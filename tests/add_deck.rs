@@ -1,7 +1,6 @@
 use std::fs::read_to_string;
-
 use assert_fs::NamedTempFile;
-use decklist_tracker::{Catalogue,  Deck};
+use decklist_tracker::{Catalogue, Deck};
 
 #[test]
 fn add_should_produce_correct_json_if_no_file_is_present() {
