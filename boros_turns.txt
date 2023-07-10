@@ -1,0 +1,32 @@
+Deck
+1 Wish
+2 Plains
+3 Mountain
+4 Sacred Foundry
+4 Gideon of the Trials
+2 Cascading Cataracts
+4 Chance for Glory
+4 Cleansing Wildfire
+4 Valakut Awakening
+4 Needleverge Pathway
+4 Rustvale Bridge
+2 Silverbluff Bridge
+4 Alchemist's Gambit
+4 Sundown Pass
+1 Invoke Calamity
+4 Strangle
+1 Volcanic Spite
+4 Reprieve
+4 The One Ring
+
+Sideboard
+2 Rest in Peace
+4 Leyline of Sanctity
+1 Jace, Wielder of Mysteries
+2 Chandra, Awakened Inferno
+1 Kaheera, the Orphanguard
+1 Fragment Reality
+3 Brotherhood's End
+1 Volcanic Spite
+
+askdjsj
