@@ -15,6 +15,7 @@ fn cli() -> Command {
                 .arg(arg!(<PATH> "The filepath of the decklist to add"))
                 .arg_required_else_help(true),
         )
+        .subcommand(Command::new("list").about("List all decks"))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,9 +31,13 @@ fn main() -> anyhow::Result<()> {
                 .context("Failed to parse decklist")?;
             let mut catalogue =
                 Catalogue::open(CATALOGUE_PATH).context("Failed to open deck catalogue")?;
-            catalogue
-                .add_deck(&deck)
-                .context("Failed to add deck to catalogue")?;
+            catalogue.add_deck(&deck);
+        }
+        Some(("list", _)) => {
+            Catalogue::open(CATALOGUE_PATH)
+                .context("Failed to open deck catalogue")?
+                .deck_list()
+                .for_each(|name| println!("{name}"));
         }
         _ => unreachable!(),
     }

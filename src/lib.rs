@@ -72,7 +72,7 @@ impl std::fmt::Debug for Collection {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct Deck {
-    name: String,
+    pub name: String,
     amounts_main: Vec<u32>,
     names_main: Vec<String>,
     amounts_side: Vec<u32>,
@@ -121,58 +121,65 @@ impl Deck {
             ..self
         }
     }
+
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        fs::read_to_string(path)?.parse()
+    }
 }
 
 pub struct Catalogue<P: AsRef<Path>> {
     path: P,
-    deserialized: Option<Vec<Deck>>,
+    decks: Vec<Deck>,
 }
 
 impl<P: AsRef<Path>> Catalogue<P> {
-    pub fn open(path: P) -> Result<Self> {
-        let catalogue_path = path.as_ref();
-        if catalogue_path.exists() {
-            Ok(Catalogue {
-                path,
-                deserialized: None,
-            })
-        } else {
-            let mut file = File::create(catalogue_path)?;
-            file.write_all(b"[]")?;
-            Ok(Catalogue {
-                path,
-                deserialized: None,
-            })
-        }
+    pub fn iter(&self) -> std::slice::Iter<Deck> {
+        self.decks.iter()
     }
-    fn deserialize(&mut self) -> Result<()> {
-        self.deserialized = Some(
-            serde_json::from_reader(File::open(&self.path)?)
-                .map_err(|err| anyhow!("failed to deserialize catalogue: {err}"))?,
-        );
-        Ok(())
+
+    pub fn open(path: P) -> Result<Self> {
+        if !path.as_ref().exists() {
+            let mut file = File::create(&path)?;
+            file.write_all(b"[]")?;
+        }
+        let decks = if !path.as_ref().exists() {
+            Vec::new()
+        } else {
+            let file = File::open(&path)?;
+            serde_json::from_reader(file)
+                .map_err(|err| anyhow!("Failed to deserialize catalogue: {err}"))?
+        };
+        Ok(Catalogue { path, decks })
     }
 
     // TODO: change &Deck to Generic Cow<Deck>
-    pub fn add_deck(&mut self, deck: &Deck) -> Result<()> {
-        if self.deserialized.is_none() {
-            self.deserialize()?;
-        }
-        self.deserialized.as_mut().unwrap().push(deck.clone());
+    pub fn add_deck(&mut self, deck: &Deck) {
+        self.decks.push(deck.clone());
+    }
+
+    pub fn remove_deck(&mut self, name: &str) -> Result<()> {
+        let i = self
+            .iter()
+            .position(|deck| deck.name == name)
+            .ok_or(anyhow!("The query `{name}` found no matching deck"))
+            .context("Failed to remove deck")?;
+        self.decks.swap_remove(i);
         Ok(())
     }
 
-    fn close(&mut self) -> Result<()> {
-        if let Some(catalogue) = self.deserialized.as_ref() {
-            fs::write(&self.path, serde_json::to_string(catalogue)?.as_bytes())?;
-        }
+    pub fn write(&mut self) -> Result<()> {
+        fs::write(&self.path, serde_json::to_string(&self.decks)?.as_bytes())?;
         Ok(())
+    }
+
+    pub fn deck_list(&self) -> impl Iterator<Item = &str> {
+        self.iter().map(|deck| deck.name.as_str())
     }
 }
 
 impl<P: AsRef<Path>> Drop for Catalogue<P> {
     fn drop(&mut self) {
-        self.close()
+        self.write()
             .unwrap_or_else(|err| eprintln!("ERROR: while closing catalogue, {err}"));
     }
 }
