@@ -7,11 +7,6 @@ use std::{
     str::FromStr,
 };
 
-pub const COLLECTION_PATH: &str =
-    r"C:\Users\Luca Bracone\AppData\Roaming\my_projects\decklist_tracker\collection.csv";
-pub const CATALOGUE_PATH: &str =
-    r"C:\Users\Luca Bracone\AppData\Roaming\my_projects\decklist_tracker\catalogue.csv";
-
 pub struct Collection {
     amounts: Vec<u32>,
     names: Vec<String>,

@@ -1,3 +1,5 @@
+use anyhow::Result;
+use assert_cmd::Command;
 use assert_fs::NamedTempFile;
 use decklist_tracker::{Catalogue, Deck};
 use std::fs::read_to_string;
@@ -15,22 +17,39 @@ fn add_should_produce_correct_json_if_no_file_is_present() {
 }
 
 #[test]
-fn adding_should_produce_correct_file() {
-    let decklist: Deck = include_str!("../boros_turns.txt")
-        .parse()
-        .unwrap_or_else(|e| panic!("Failed to parse decklist: {e}"));
-    let temp_file = NamedTempFile::new("test_catalogue.json")
-        .unwrap_or_else(|err| panic!("ERROR: failed to open temp file because {err}"));
-    let mut catalogue = Catalogue::open(&temp_file)
-        .unwrap_or_else(|err| panic!("ERROR: failed to open catalogue because {err}"));
-    catalogue.add_deck(&decklist);
-    drop(catalogue);
-    let result = read_to_string(temp_file)
-        .unwrap_or_else(|err| panic!("ERROR: Failed to read temp file because {err}"));
-    let mut expected = String::from('[');
-    expected.push_str(&serde_json::to_string(&decklist).unwrap());
-    expected.push(']');
+fn adding_should_produce_correct_file() -> Result<()> {
+    let temp_file = NamedTempFile::new("test_catalogue.json")?;
+    let mut command = Command::cargo_bin("decklist-tracker")?;
+    command
+        .arg("-c")
+        .arg(temp_file.path())
+        .arg("add")
+        .arg("boros_turns.txt");
+    let decklist: Deck = include_str!("../boros_turns.txt").parse()?;
+    command.assert().success();
+    let result = read_to_string(temp_file)?;
+    let expected = serde_json::to_string(&[decklist])?;
     assert_eq!(result, expected);
+    Ok(())
+}
+
+#[test]
+fn adding_two_at_a_time() -> Result<()> {
+    let temp_file = NamedTempFile::new("test_catalogue.json")?;
+    let mut command = Command::cargo_bin("decklist-tracker")?;
+    command
+        .arg("-c")
+        .arg(temp_file.path())
+        .arg("add")
+        .arg("boros_turns.txt")
+        .arg("deification_prison.txt");
+    let deck1: Deck = include_str!("../boros_turns.txt").parse()?;
+    let deck2: Deck = include_str!("../deification_prison.txt").parse()?;
+    command.assert().success();
+    let result = read_to_string(temp_file)?;
+    let expected = serde_json::to_string(&[deck1, deck2])?;
+    assert_eq!(result, expected);
+    Ok(())
 }
 
 #[test]
