@@ -1,6 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::Write,
     path::Path,
@@ -8,9 +10,18 @@ use std::{
 };
 
 pub struct Collection {
-    amounts: Vec<u32>,
+    amounts: Vec<u8>,
     names: Vec<String>,
-    rarities: Vec<u8>,
+    rarities: Vec<Rarity>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Rarity {
+    Common,
+    Uncommon,
+    Rare,
+    Mythic,
+    Land,
 }
 
 impl Collection {
@@ -32,11 +43,11 @@ impl Collection {
             let rarity = elements
                 .nth(2)
                 .map(|s| match s {
-                    "common" => Ok(0),
-                    "uncommon" => Ok(1),
-                    "rare" => Ok(2),
-                    "mythic" => Ok(3),
-                    "land" => Ok(4),
+                    "common" => Ok(Rarity::Common),
+                    "uncommon" => Ok(Rarity::Uncommon),
+                    "rare" => Ok(Rarity::Rare),
+                    "mythic" => Ok(Rarity::Mythic),
+                    "land" => Ok(Rarity::Land),
                     x => bail!("Unexpected rarity `{x}`"),
                 })
                 .with_context(err_message)??;
@@ -51,6 +62,42 @@ impl Collection {
             rarities,
         })
     }
+
+    pub fn missing(&self, deck: &Deck) -> Result<(u8, u8, u8, u8)> {
+        Ok(deck
+            .amounts_main
+            .iter()
+            .zip(deck.names_main.iter())
+            .map(|(n, name)| {
+                self.names
+                    .iter()
+                    .position(|col_name| col_name == name)
+                    .map(|i| {
+                        let in_collection = self.amounts[i];
+                        (n.saturating_sub(in_collection).max(0), self.rarities[i])
+                    })
+                    .map(|(m, r)| match r {
+                        Rarity::Common => (m, 0, 0, 0),
+                        Rarity::Uncommon => (0, m, 0, 0),
+                        Rarity::Rare => (0, 0, m, 0),
+                        Rarity::Mythic => (0, 0, 0, m),
+                        Rarity::Land => (0, 0, 0, 0),
+                    })
+                    .ok_or(anyhow!("Card `{name}` is missing from the collection"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .fold((0, 0, 0, 0), |acc, x| {
+                (acc.0 + x.0, acc.1 + x.1, acc.2 + x.2, acc.3 + x.3)
+            }))
+    }
+
+    pub fn into_hash_map(self) -> HashMap<String, (u8, Rarity)> {
+        self.names
+            .into_iter()
+            .zip(self.amounts.into_iter().zip(self.rarities.into_iter()))
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for Collection {
@@ -59,7 +106,7 @@ impl std::fmt::Debug for Collection {
             .iter()
             .zip(self.names.iter())
             .zip(self.rarities.iter())
-            .try_for_each(|((a, n), r)| writeln!(f, "{a} {n} ({r})"))?;
+            .try_for_each(|((a, n), r)| writeln!(f, "{a} {n} ({r:?})"))?;
         Ok(())
     }
 }
@@ -68,35 +115,73 @@ impl std::fmt::Debug for Collection {
 #[allow(dead_code)]
 pub struct Deck {
     pub name: String,
-    amounts_main: Vec<u32>,
+    companion: Option<String>,
+    amounts_main: Vec<u8>,
     names_main: Vec<String>,
-    amounts_side: Vec<u32>,
+    amounts_side: Vec<u8>,
     names_side: Vec<String>,
 }
 
 impl FromStr for Deck {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut parsing_main = true;
+        enum ParsingMode {
+            Companion,
+            Main,
+            Side,
+        }
+        let mut parsing_mode = ParsingMode::Main;
         let mut amounts_main = Vec::new();
         let mut names_main = Vec::new();
         let mut amounts_side = Vec::new();
         let mut names_side = Vec::new();
+        let mut companion = None;
         for (i, l) in s.lines().enumerate() {
-            if l.trim().is_empty() {
-                parsing_main = false
-            }
-            let Some((num, name)) = l.split_once(' ') else { continue };
-            let num = num.parse().with_context(|| {
+            match l.trim() {
+                "Companion" => {
+                    parsing_mode = ParsingMode::Companion;
+                    continue;
+                }
+                "Deck" => {
+                    parsing_mode = ParsingMode::Main;
+                    continue;
+                }
+                "Sideboard" => {
+                    parsing_mode = ParsingMode::Side;
+                    continue;
+                }
+                "" => {
+                    continue;
+                }
+                _ => {}
+            };
+            let error_message = || {
                 format!("Expected line {} to be of the form `{{integer}} {{card_name}},` but found `{l}`", i+1)
-            })?;
+            };
+            let mut words = l.split(' ');
+            let num = words
+                .next()
+                .with_context(error_message)?
+                .parse()
+                .with_context(error_message)?;
+            let name: String = words
+                .take_while(|w| !w.starts_with('('))
+                .intersperse(" ")
+                .collect();
             let name = name.to_string();
-            if parsing_main {
-                amounts_main.push(num);
-                names_main.push(name);
-            } else {
-                amounts_side.push(num);
-                names_side.push(name);
+            if name.is_empty() {
+                bail!(error_message());
+            }
+            match parsing_mode {
+                ParsingMode::Companion => companion = Some(name),
+                ParsingMode::Main => {
+                    amounts_main.push(num);
+                    names_main.push(name);
+                }
+                ParsingMode::Side => {
+                    amounts_side.push(num);
+                    names_side.push(name);
+                }
             }
         }
         Ok(Deck {
@@ -105,6 +190,7 @@ impl FromStr for Deck {
             amounts_side,
             names_main,
             names_side,
+            companion,
         })
     }
 }
@@ -120,14 +206,22 @@ impl Deck {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         fs::read_to_string(path)?.parse()
     }
+
+    pub fn cards(&self) -> impl Iterator<Item = (&u8, &String)> {
+        self.amounts_main
+            .iter()
+            .zip(self.names_main.iter())
+            .chain(self.amounts_side.iter().zip(self.names_side.iter()))
+    }
 }
 
-pub struct Catalogue<P: AsRef<Path>> {
+#[derive(Debug)]
+pub struct Roster<P: AsRef<Path>> {
     path: P,
     decks: Vec<Deck>,
 }
 
-impl<P: AsRef<Path>> Catalogue<P> {
+impl<P: AsRef<Path>> Roster<P> {
     pub fn iter(&self) -> std::slice::Iter<Deck> {
         self.decks.iter()
     }
@@ -142,9 +236,9 @@ impl<P: AsRef<Path>> Catalogue<P> {
         } else {
             let file = File::open(&path)?;
             serde_json::from_reader(file)
-                .map_err(|err| anyhow!("Failed to deserialize catalogue: {err}"))?
+                .map_err(|err| anyhow!("Failed to deserialize roster: {err}"))?
         };
-        Ok(Catalogue { path, decks })
+        Ok(Roster { path, decks })
     }
 
     // TODO: change &Deck to Generic Cow<Deck>
@@ -172,9 +266,9 @@ impl<P: AsRef<Path>> Catalogue<P> {
     }
 }
 
-impl<P: AsRef<Path>> Drop for Catalogue<P> {
+impl<P: AsRef<Path>> Drop for Roster<P> {
     fn drop(&mut self) {
         self.write()
-            .unwrap_or_else(|err| eprintln!("ERROR: while closing catalogue, {err}"));
+            .unwrap_or_else(|err| eprintln!("ERROR: while closing roster, {err}"));
     }
 }
