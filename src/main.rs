@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context};
 use clap::{arg, Parser, Subcommand};
-use decklist_tracker::{Collection, Deck, Rarity, Roster};
+use decklist_tracker::{CardData, Collection, Deck, Rarity, Roster};
 use directories::BaseDirs;
 use std::{
     collections::HashMap,
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::ShowDeck { deck_name }) => {
             if let Some(deck) = roster.iter().find(|in_roster| deck_name == in_roster.name) {
-                println!("{deck:#?}");
+                println!("{deck}");
             } else {
                 bail!("Could not find {deck_name} in roster {roster_path:?}");
             }
@@ -121,7 +121,39 @@ fn main() -> anyhow::Result<()> {
                 .find(|in_cat| in_cat.name == deck_name)
                 .map(|deck| collection.missing(deck))
             {
-                Some(missing_cards) => println!("{:?}", missing_cards?),
+                Some(missing_cards) => {
+                    let mut missing_cards = missing_cards?;
+                    missing_cards.sort_by_key(|m| m.rarity);
+                    let missing_rares: u8 = missing_cards
+                        .iter()
+                        .map(|m| {
+                            if m.rarity == Rarity::Rare {
+                                m.amount
+                            } else {
+                                0
+                            }
+                        })
+                        .sum();
+                    let missing_mythics: u8 = missing_cards
+                        .iter()
+                        .map(|m| {
+                            if m.rarity == Rarity::Mythic {
+                                m.amount
+                            } else {
+                                0
+                            }
+                        })
+                        .sum();
+                    println!(
+                        "Missing rares: {missing_rares}. Missing mythics: {missing_mythics}.\n"
+                    );
+                    missing_cards
+                        .iter()
+                        .filter(|m| m.amount > 0)
+                        .for_each(|missing| {
+                            println!("{:?}\t {} {}", missing.rarity, missing.amount, missing.name);
+                        })
+                }
                 None => anyhow::bail!("Cannot find deck {deck_name} in deck roster"),
             }
         }
@@ -144,6 +176,9 @@ fn main() -> anyhow::Result<()> {
                     let (amount_coll, rarity) =
                         collection.get(card_name).unwrap_or(&(0, Rarity::Rare));
                     let needed = amount_deck.saturating_sub(*amount_coll);
+                    if needed == 0 {
+                        continue;
+                    }
                     match rarity {
                         Rarity::Common => *sug_common.entry(card_name).or_insert(0) += needed,
                         Rarity::Uncommon => *sug_uncommon.entry(card_name).or_insert(0) += needed,

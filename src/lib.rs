@@ -9,19 +9,30 @@ use std::{
     str::FromStr,
 };
 
-pub struct Collection {
-    amounts: Vec<u8>,
-    names: Vec<String>,
-    rarities: Vec<Rarity>,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
     Uncommon,
     Rare,
     Mythic,
     Land,
+}
+
+pub struct CardData {
+    pub amount: u8,
+    pub name: String,
+    pub rarity: Rarity,
+}
+
+pub struct Missing {
+    missing_main: Vec<CardData>,
+    missing_side: Vec<CardData>,
+}
+
+pub struct Collection {
+    amounts: Vec<u8>,
+    names: Vec<String>,
+    rarities: Vec<Rarity>,
 }
 
 impl Collection {
@@ -63,40 +74,56 @@ impl Collection {
         })
     }
 
-    pub fn missing(&self, deck: &Deck) -> Result<(u8, u8, u8, u8)> {
-        Ok(deck
-            .amounts_main
+    pub fn missing(&self, deck: &Deck) -> Result<Vec<CardData>> {
+        deck.amounts_main
             .iter()
             .zip(deck.names_main.iter())
             .map(|(n, name)| {
+                // For each card in the deck
                 self.names
                     .iter()
                     .position(|col_name| col_name == name)
-                    .map(|i| {
-                        let in_collection = self.amounts[i];
-                        (n.saturating_sub(in_collection).max(0), self.rarities[i])
-                    })
-                    .map(|(m, r)| match r {
-                        Rarity::Common => (m, 0, 0, 0),
-                        Rarity::Uncommon => (0, m, 0, 0),
-                        Rarity::Rare => (0, 0, m, 0),
-                        Rarity::Mythic => (0, 0, 0, m),
-                        Rarity::Land => (0, 0, 0, 0),
-                    })
+                    .map_or_else(
+                        || {
+                            if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" =
+                                name.as_str()
+                            {
+                                Some(CardData {
+                                    amount: 0,
+                                    name: name.clone(),
+                                    rarity: Rarity::Land,
+                                })
+                            } else {
+                                None
+                            }
+                        },
+                        |i| {
+                            let in_collection = self.amounts[i];
+                            let amount_missing = n.saturating_sub(in_collection).max(0); // Find how much is missing
+                            Some(CardData {
+                                amount: amount_missing,
+                                name: name.clone(),
+                                rarity: self.rarities[i],
+                            })
+                        },
+                    )
                     .ok_or(anyhow!("Card `{name}` is missing from the collection"))
             })
-            .collect::<Result<Vec<_>>>()?
-            .iter()
-            .fold((0, 0, 0, 0), |acc, x| {
-                (acc.0 + x.0, acc.1 + x.1, acc.2 + x.2, acc.3 + x.3)
-            }))
+            .collect::<Result<Vec<_>>>()
     }
 
     pub fn into_hash_map(self) -> HashMap<String, (u8, Rarity)> {
-        self.names
-            .into_iter()
-            .zip(self.amounts.into_iter().zip(self.rarities.into_iter()))
-            .collect()
+        let mut result = HashMap::with_capacity(self.names.len());
+        for (i, name) in self.names.into_iter().enumerate() {
+            let (other_amount, other_rarity) = (self.amounts[i], self.rarities[i]);
+            let (ref mut cur_amount, ref mut cur_rarity) =
+                result.entry(name).or_insert((other_amount, other_rarity));
+            if *cur_amount < other_amount {
+                *cur_amount = other_amount;
+                *cur_rarity = other_rarity;
+            }
+        }
+        result
     }
 }
 
@@ -120,6 +147,24 @@ pub struct Deck {
     names_main: Vec<String>,
     amounts_side: Vec<u8>,
     names_side: Vec<String>,
+}
+
+impl std::fmt::Display for Deck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}\n", self.name)?;
+        if let Some(companion) = self.companion.as_ref() {
+            writeln!(f, "Companion\n1 {companion}\n")?;
+        }
+        writeln!(f, "Deck")?;
+        for (amount, name) in self.amounts_main.iter().zip(self.names_main.iter()) {
+            writeln!(f, "{amount} {name}")?;
+        }
+        writeln!(f, "\nSideboard")?;
+        for (amount, name) in self.amounts_side.iter().zip(self.names_side.iter()) {
+            writeln!(f, "{amount} {name}")?;
+        }
+        Ok(())
+    }
 }
 
 impl FromStr for Deck {
@@ -164,10 +209,8 @@ impl FromStr for Deck {
                 .with_context(error_message)?
                 .parse()
                 .with_context(error_message)?;
-            let name: String = words
-                .take_while(|w| !w.starts_with('('))
-                .intersperse(" ")
-                .collect();
+            let name: String =
+                Itertools::intersperse(words.take_while(|w| !w.starts_with('(')), " ").collect();
             let name = name.to_string();
             if name.is_empty() {
                 bail!(error_message());
