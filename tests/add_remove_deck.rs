@@ -1,7 +1,7 @@
 use anyhow::Result;
 use assert_cmd::Command;
 use assert_fs::NamedTempFile;
-use decklist_tracker::{Deck, Roster};
+use detr::{Deck, Roster};
 use std::fs::read_to_string;
 
 #[test]

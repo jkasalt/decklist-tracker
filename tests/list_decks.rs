@@ -1,5 +1,5 @@
 use assert_fs::NamedTempFile;
-use decklist_tracker::{Deck, Roster};
+use detr::{Deck, Roster};
 #[test]
 fn list_decks_works() {
     let temp_file = NamedTempFile::new("test_roster.json").unwrap();

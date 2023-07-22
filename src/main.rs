@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context};
 use clap::{arg, Parser, Subcommand};
-use decklist_tracker::{CardData, Collection, Deck, Rarity, Roster};
+use detr::{CardData, Collection, Deck, Rarity, Roster};
 use directories::BaseDirs;
 use std::{
     collections::HashMap,
@@ -45,7 +45,11 @@ enum Commands {
     ShowDeck {
         deck_name: String,
     },
+    Export {
+        deck_name: String,
+    },
     Suggest,
+    SortDecks,
     List,
 }
 
@@ -69,6 +73,14 @@ fn main() -> anyhow::Result<()> {
     let collection = Collection::from_csv(&collection_path)
         .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
     match cli.command {
+        Some(Commands::Export { deck_name }) => {
+            let deck = roster
+                .iter()
+                .find(|in_roster| in_roster.name == deck_name)
+                .with_context(|| format!("Failed to find deck {deck_name} in roster"))?;
+            clipboard_win::set_clipboard(clipboard_win::formats::Unicode, deck.to_string())
+                .map_err(|err| anyhow!("Failed to set clipboard {err}"))?;
+        }
         Some(Commands::ShowDeck { deck_name }) => {
             if let Some(deck) = roster.iter().find(|in_roster| deck_name == in_roster.name) {
                 println!("{deck}");
@@ -121,8 +133,7 @@ fn main() -> anyhow::Result<()> {
                 .find(|in_cat| in_cat.name == deck_name)
                 .map(|deck| collection.missing(deck))
             {
-                Some(missing_cards) => {
-                    let mut missing_cards = missing_cards?;
+                Some(mut missing_cards) => {
                     missing_cards.sort_by_key(|m| m.rarity);
                     let missing_rares: u8 = missing_cards
                         .iter()
@@ -161,12 +172,28 @@ fn main() -> anyhow::Result<()> {
             std::fs::copy(path, collection_path)?;
         }
         Some(Commands::Suggest) => {
-            let collection = collection.into_hash_map();
             let mut sug_common = HashMap::new();
             let mut sug_uncommon = HashMap::new();
             let mut sug_rare = HashMap::new();
             let mut sug_mythic = HashMap::new();
-            for deck in roster.iter() {
+
+            let mut decks: Vec<_> = roster
+                .iter()
+                .filter(|deck| !collection.missing(deck).is_empty())
+                .cloned()
+                .collect();
+            decks.sort_unstable_by_key(|deck| {
+                collection
+                    .missing(deck)
+                    .iter()
+                    .filter(|card| matches!(card.rarity, Rarity::Rare | Rarity::Mythic))
+                    .map(|card| card.amount)
+                    .sum::<u8>()
+            });
+
+            let collection = collection.into_hash_map();
+
+            for (i, deck) in decks.iter().enumerate() {
                 for (amount_deck, card_name) in deck.cards() {
                     if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" =
                         card_name.as_str()
@@ -179,13 +206,15 @@ fn main() -> anyhow::Result<()> {
                     if needed == 0 {
                         continue;
                     }
-                    match rarity {
-                        Rarity::Common => *sug_common.entry(card_name).or_insert(0) += needed,
-                        Rarity::Uncommon => *sug_uncommon.entry(card_name).or_insert(0) += needed,
-                        Rarity::Rare => *sug_rare.entry(card_name).or_insert(0) += needed,
-                        Rarity::Mythic => *sug_mythic.entry(card_name).or_insert(0) += needed,
-                        Rarity::Land => {}
-                    }
+                    let sugg_coeff = needed as f64 / (i + 1) as f64;
+                    let selected_sug = match rarity {
+                        Rarity::Common => &mut sug_common,
+                        Rarity::Uncommon => &mut sug_uncommon,
+                        Rarity::Rare => &mut sug_rare,
+                        Rarity::Mythic => &mut sug_mythic,
+                        Rarity::Land | Rarity::Unknown => continue,
+                    };
+                    *selected_sug.entry(card_name).or_insert(0.0) += sugg_coeff;
                 }
             }
 
@@ -198,11 +227,25 @@ fn main() -> anyhow::Result<()> {
             for suggestion_group in suggestions {
                 println!("{}", suggestion_group.1);
                 let mut suggestion_group: Vec<_> = suggestion_group.0.into_iter().collect();
-                suggestion_group.sort_unstable_by_key(|(_, amount)| std::cmp::Reverse(*amount));
-                for (name, amount) in suggestion_group.iter().take(15) {
-                    println!("{amount} {name}");
+                suggestion_group.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // TODO: remove unwrap?, note: ascending order
+                for (name, amount) in suggestion_group.iter().take(10) {
+                    println!("{amount:.2} {name}");
                 }
                 println!();
+            }
+        }
+        Some(Commands::SortDecks) => {
+            let mut decks: Vec<_> = roster.iter().cloned().collect();
+            decks.sort_unstable_by_key(|deck| {
+                collection
+                    .missing(deck)
+                    .iter()
+                    .filter(|card| matches!(card.rarity, Rarity::Rare | Rarity::Mythic))
+                    .map(|card| card.amount)
+                    .sum::<u8>()
+            });
+            for deck in decks {
+                println!("{}", deck.name);
             }
         }
         None => {}

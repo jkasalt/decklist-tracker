@@ -16,6 +16,7 @@ pub enum Rarity {
     Rare,
     Mythic,
     Land,
+    Unknown,
 }
 
 pub struct CardData {
@@ -74,10 +75,11 @@ impl Collection {
         })
     }
 
-    pub fn missing(&self, deck: &Deck) -> Result<Vec<CardData>> {
+    pub fn missing(&self, deck: &Deck) -> Vec<CardData> {
         deck.amounts_main
             .iter()
             .zip(deck.names_main.iter())
+            .chain(deck.amounts_side.iter().zip(deck.names_side.iter()))
             .map(|(n, name)| {
                 // For each card in the deck
                 self.names
@@ -88,28 +90,31 @@ impl Collection {
                             if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" =
                                 name.as_str()
                             {
-                                Some(CardData {
+                                CardData {
                                     amount: 0,
                                     name: name.clone(),
                                     rarity: Rarity::Land,
-                                })
+                                }
                             } else {
-                                None
+                                CardData {
+                                    amount: *n,
+                                    name: name.clone(),
+                                    rarity: Rarity::Unknown,
+                                }
                             }
                         },
                         |i| {
                             let in_collection = self.amounts[i];
                             let amount_missing = n.saturating_sub(in_collection).max(0); // Find how much is missing
-                            Some(CardData {
+                            CardData {
                                 amount: amount_missing,
                                 name: name.clone(),
                                 rarity: self.rarities[i],
-                            })
+                            }
                         },
                     )
-                    .ok_or(anyhow!("Card `{name}` is missing from the collection"))
             })
-            .collect::<Result<Vec<_>>>()
+            .collect()
     }
 
     pub fn into_hash_map(self) -> HashMap<String, (u8, Rarity)> {
@@ -151,7 +156,6 @@ pub struct Deck {
 
 impl std::fmt::Display for Deck {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{}\n", self.name)?;
         if let Some(companion) = self.companion.as_ref() {
             writeln!(f, "Companion\n1 {companion}\n")?;
         }
@@ -159,9 +163,11 @@ impl std::fmt::Display for Deck {
         for (amount, name) in self.amounts_main.iter().zip(self.names_main.iter()) {
             writeln!(f, "{amount} {name}")?;
         }
-        writeln!(f, "\nSideboard")?;
-        for (amount, name) in self.amounts_side.iter().zip(self.names_side.iter()) {
-            writeln!(f, "{amount} {name}")?;
+        if !self.names_side.is_empty() {
+            writeln!(f, "\nSideboard")?;
+            for (amount, name) in self.amounts_side.iter().zip(self.names_side.iter()) {
+                writeln!(f, "{amount} {name}")?;
+            }
         }
         Ok(())
     }
