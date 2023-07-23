@@ -25,10 +25,10 @@ pub struct CardData {
     pub rarity: Rarity,
 }
 
-pub struct Missing {
-    missing_main: Vec<CardData>,
-    missing_side: Vec<CardData>,
-}
+// pub struct Missing {
+//     missing_main: Vec<CardData>,
+//     missing_side: Vec<CardData>,
+// }
 
 pub struct Collection {
     amounts: Vec<u8>,
@@ -55,14 +55,14 @@ impl Collection {
             let rarity = elements
                 .nth(2)
                 .map(|s| match s {
-                    "common" => Ok(Rarity::Common),
-                    "uncommon" => Ok(Rarity::Uncommon),
-                    "rare" => Ok(Rarity::Rare),
-                    "mythic" => Ok(Rarity::Mythic),
-                    "land" => Ok(Rarity::Land),
-                    x => bail!("Unexpected rarity `{x}`"),
+                    "common" => Rarity::Common,
+                    "uncommon" => Rarity::Uncommon,
+                    "rare" => Rarity::Rare,
+                    "mythic" => Rarity::Mythic,
+                    "land" => Rarity::Land,
+                    _ => Rarity::Unknown,
                 })
-                .with_context(err_message)??;
+                .with_context(err_message)?;
             amounts.push(amount);
             names.push(name);
             rarities.push(rarity);
@@ -75,10 +75,17 @@ impl Collection {
         })
     }
 
-    pub fn missing(&self, deck: &Deck) -> Vec<CardData> {
+    pub fn missing<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
         deck.amounts_main
             .iter()
             .zip(deck.names_main.iter())
+            .filter(|(_, deck_card_name)| {
+                // Ignore basic lands
+                !matches!(
+                    deck_card_name.as_str(),
+                    "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
+                )
+            })
             .chain(deck.amounts_side.iter().zip(deck.names_side.iter()))
             .map(|(n, name)| {
                 // For each card in the deck
@@ -86,26 +93,14 @@ impl Collection {
                     .iter()
                     .position(|col_name| col_name == name)
                     .map_or_else(
-                        || {
-                            if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" =
-                                name.as_str()
-                            {
-                                CardData {
-                                    amount: 0,
-                                    name: name.clone(),
-                                    rarity: Rarity::Land,
-                                }
-                            } else {
-                                CardData {
-                                    amount: *n,
-                                    name: name.clone(),
-                                    rarity: Rarity::Unknown,
-                                }
-                            }
+                        || CardData {
+                            amount: *n,
+                            name: name.clone(),
+                            rarity: Rarity::Unknown,
                         },
                         |i| {
                             let in_collection = self.amounts[i];
-                            let amount_missing = n.saturating_sub(in_collection).max(0); // Find how much is missing
+                            let amount_missing = n.saturating_sub(in_collection);
                             CardData {
                                 amount: amount_missing,
                                 name: name.clone(),
@@ -114,7 +109,6 @@ impl Collection {
                         },
                     )
             })
-            .collect()
     }
 
     pub fn into_hash_map(self) -> HashMap<String, (u8, Rarity)> {
@@ -271,6 +265,9 @@ pub struct Roster<P: AsRef<Path>> {
 }
 
 impl<P: AsRef<Path>> Roster<P> {
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<Deck> {
+        self.decks.iter_mut()
+    }
     pub fn iter(&self) -> std::slice::Iter<Deck> {
         self.decks.iter()
     }

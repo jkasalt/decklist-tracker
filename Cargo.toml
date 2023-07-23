@@ -10,6 +10,7 @@ anyhow = "1.0.71"
 clap = { version = "4.3.11", features = ["derive"] }
 clipboard-win = "4.5.0"
 directories = "5.0.1"
+either = "1.9.0"
 itertools = "0.11.0"
 once_cell = "1.18.0"
 serde = { version = "1.0.167", features = ["derive"] }
