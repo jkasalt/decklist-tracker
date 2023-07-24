@@ -25,12 +25,54 @@ pub struct CardData {
     pub rarity: Rarity,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug)]
+pub struct WildcardCoefficients {
+    pub common: f32,
+    pub uncommon: f32,
+    pub rare: f32,
+    pub mythic: f32,
+}
+
+impl WildcardCoefficients {
+    pub fn select(&self, rarity: &Rarity) -> f32 {
+        match rarity {
+            Rarity::Common => self.common,
+            Rarity::Uncommon => self.uncommon,
+            Rarity::Rare => self.rare,
+            Rarity::Mythic => self.mythic,
+            Rarity::Land | Rarity::Unknown => 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct Wildcards {
-    common: u32,
-    uncommon: u32,
-    rare: u32,
-    mythic: u32,
+    pub common: u32,
+    pub uncommon: u32,
+    pub rare: u32,
+    pub mythic: u32,
+}
+
+impl Wildcards {
+    pub fn select(&self, rarity: &Rarity) -> u32 {
+        match rarity {
+            Rarity::Common => self.common,
+            Rarity::Uncommon => self.uncommon,
+            Rarity::Rare => self.rare,
+            Rarity::Mythic => self.mythic,
+            Rarity::Land | Rarity::Unknown => 0,
+        }
+    }
+
+    pub fn coefficients(&self) -> WildcardCoefficients {
+        let total = self.common + self.uncommon + self.rare + self.mythic;
+        WildcardCoefficients {
+            common: total as f32 / (1 + self.common) as f32,
+            uncommon: total as f32 / (1 + self.uncommon) as f32,
+            rare: total as f32 / (1 + self.rare) as f32,
+            mythic: total as f32 / (1 + self.mythic) as f32,
+        }
+    }
 }
 
 type CollectionInner = HashMap<String, Vec<(u8, Rarity)>>;

@@ -1,11 +1,11 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
-use detr::{CardData, Collection, Deck, Rarity, Roster};
+use detr::{CardData, Collection, Deck, Rarity, Roster, Wildcards};
 use directories::BaseDirs;
 use either::*;
 use std::{
     collections::HashMap,
-    fs::{self},
+    fs::{self, File},
     path::{Path, PathBuf},
 };
 
@@ -55,15 +55,26 @@ enum Commands {
         from_name: String,
         to_name: String,
     },
+    SetWildcards {
+        common: u32,
+        uncommon: u32,
+        rare: u32,
+        mythic: u32,
+    },
 }
 
-fn sort_by_missing(decks: &mut [Deck], collection: &Collection) {
-    decks.sort_unstable_by_key(|deck| {
-        collection
-            .missing(deck)
-            .filter(|card_data| matches!(card_data.rarity, Rarity::Common | Rarity::Rare))
-            .map(|card| card.amount)
-            .sum::<u8>()
+fn sort_by_missing(decks: &mut [Deck], collection: &Collection, wildcards: &Wildcards) {
+    let coeffs = wildcards.coefficients();
+    decks.sort_unstable_by(|deck1, deck2| {
+        let val1: f32 = collection
+            .missing(deck1)
+            .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
+            .sum();
+        let val2 = collection
+            .missing(deck2)
+            .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
+            .sum();
+        val1.partial_cmp(&val2).unwrap()
     });
 }
 
@@ -113,7 +124,27 @@ fn missing<P: AsRef<Path>>(
     Ok(())
 }
 
-fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result<()> {
+fn smart_amount(versions: &[(u8, Rarity)], wildcards: &Wildcards) -> (u8, Rarity) {
+    if let Some(&(amount, rarity)) = versions.iter().find(|(amount, _)| *amount == 4) {
+        return (amount, rarity);
+    }
+    *versions
+        .iter()
+        .min_by(|(amount1, rarity1), (amount2, rarity2)| {
+            let w1 = wildcards.select(rarity1);
+            let w2 = wildcards.select(rarity2);
+            ((4 - amount1) as f64 / w1 as f64)
+                .partial_cmp(&((4 - amount2) as f64 / w2 as f64))
+                .unwrap()
+        })
+        .unwrap()
+}
+
+fn suggest<P: AsRef<Path>>(
+    roster: &Roster<P>,
+    collection: &Collection,
+    wildcards: &Wildcards,
+) -> Result<()> {
     let mut sug_common = HashMap::new();
     let mut sug_uncommon = HashMap::new();
     let mut sug_rare = HashMap::new();
@@ -124,14 +155,17 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result
         .filter(|deck| collection.missing(deck).count() > 1)
         .cloned()
         .collect();
-    sort_by_missing(&mut decks, &collection);
+
+    sort_by_missing(&mut decks, collection, wildcards);
+
     let mut handle_card = |amount_deck: &u8, card_name, i: usize| {
         if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = card_name {
             return;
         }
+        // For cards with multiple versions, get the one for which the wildcards cost is the least impactful
         let (amount_coll, rarity) = collection
             .get(card_name)
-            .map(|v| v[0])
+            .map(|v| smart_amount(v, wildcards))
             .unwrap_or((0, Rarity::Unknown));
         let needed = amount_deck.saturating_sub(amount_coll);
         if needed == 0 {
@@ -151,13 +185,11 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result
         };
         *selected_sug.entry(card_name).or_insert(0.0) += sugg_coeff;
     };
-
     for (i, deck) in decks.iter().enumerate() {
         for (amount_deck, card_name) in deck.cards() {
             handle_card(amount_deck, card_name, i);
         }
     }
-
     let suggestions = vec![
         (sug_common, "Common"),
         (sug_uncommon, "Uncommon"),
@@ -173,7 +205,6 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result
         }
         println!();
     }
-
     Ok(())
 }
 
@@ -219,6 +250,12 @@ fn main() -> anyhow::Result<()> {
         .collection_path
         .map(PathBuf::from)
         .unwrap_or_else(|| app_dir.join("collection.csv"));
+    let wildcards_path = app_dir.join("wildcards.json");
+    let wildcards: Wildcards = if !wildcards_path.exists() {
+        Wildcards::default()
+    } else {
+        serde_json::from_reader(File::open(&wildcards_path)?).unwrap_or_default()
+    };
     let mut roster = Roster::open(&roster_path)
         .with_context(|| format!("Failed to open deck roster with path {roster_path:?}"))?;
     let collection = Collection::from_csv(&collection_path)
@@ -262,13 +299,32 @@ fn main() -> anyhow::Result<()> {
                 ))?;
             deck.name = to_name;
         }
-        Some(Commands::Suggest) => suggest(&roster, collection)?,
+        Some(Commands::Suggest) => suggest(&roster, &collection, &wildcards)?,
         Some(Commands::List) => {
+            let coeffs = wildcards.coefficients();
             let mut decks: Vec<_> = roster.iter().cloned().collect();
-            sort_by_missing(&mut decks, &collection);
+            sort_by_missing(&mut decks, &collection, &wildcards);
             for deck in decks {
-                println!("{}", deck.name);
+                let val: f32 = collection
+                    .missing(&deck)
+                    .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
+                    .sum();
+                println!("{val:.1}\t {}", deck.name);
             }
+        }
+        Some(Commands::SetWildcards {
+            common,
+            uncommon,
+            rare,
+            mythic,
+        }) => {
+            let wildcards = Wildcards {
+                common,
+                uncommon,
+                rare,
+                mythic,
+            };
+            fs::write(wildcards_path, serde_json::to_string(&wildcards)?)?;
         }
         None => {}
     }
