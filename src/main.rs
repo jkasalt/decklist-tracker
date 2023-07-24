@@ -141,7 +141,11 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result
             Rarity::Uncommon => &mut sug_uncommon,
             Rarity::Rare => &mut sug_rare,
             Rarity::Mythic => &mut sug_mythic,
-            Rarity::Land | Rarity::Unknown => return,
+            Rarity::Unknown => {
+                eprintln!("Warning: unknown card encountered ({card_name})");
+                return;
+            }
+            Rarity::Land => return,
         };
         *selected_sug.entry(card_name).or_insert(0.0) += sugg_coeff;
     };
@@ -219,12 +223,13 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
     match cli.command {
         Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
-        Some(Commands::Show { deck_name }) => {
-            match roster.iter().find(|in_roster| deck_name == in_roster.name) {
-                Some(deck) => println!("{deck}"),
-                None => bail!("Could not find {deck_name} in roster {roster_path:?}"),
-            }
-        }
+        Some(Commands::Show { deck_name }) => roster
+            .iter()
+            .find(|in_roster| deck_name == in_roster.name)
+            .map(|deck| println!("{deck}"))
+            .ok_or(anyhow!(
+                "Could not find {deck_name} in roster {roster_path:?}"
+            ))?,
         Some(Commands::Remove { deck_name }) => {
             roster
                 .remove_deck(&deck_name)
