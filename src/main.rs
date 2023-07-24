@@ -63,6 +63,24 @@ enum Commands {
     },
 }
 
+fn with_crafting_costs(
+    decks: Vec<Deck>,
+    collection: &Collection,
+    wildcards: &Wildcards,
+) -> Vec<(f32, Deck)> {
+    let coeffs = wildcards.coefficients();
+    decks
+        .into_iter()
+        .map(|deck| {
+            let val: f32 = collection
+                .missing(&deck)
+                .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
+                .sum();
+            (val, deck)
+        })
+        .collect()
+}
+
 fn sort_by_missing(decks: &mut [Deck], collection: &Collection, wildcards: &Wildcards) {
     let coeffs = wildcards.coefficients();
     decks.sort_unstable_by(|deck1, deck2| {
@@ -157,8 +175,9 @@ fn suggest<P: AsRef<Path>>(
         .collect();
 
     sort_by_missing(&mut decks, collection, wildcards);
+    let decks = with_crafting_costs(decks, collection, wildcards);
 
-    let mut handle_card = |amount_deck: &u8, card_name, i: usize| {
+    let mut handle_card = |amount_deck: &u8, card_name, deck_coeff: f32| {
         if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = card_name {
             return;
         }
@@ -171,7 +190,7 @@ fn suggest<P: AsRef<Path>>(
         if needed == 0 {
             return;
         }
-        let sugg_coeff = needed as f64 / (i + 1) as f64;
+        let sugg_coeff = needed as f64 / deck_coeff as f64;
         let selected_sug = match rarity {
             Rarity::Common => &mut sug_common,
             Rarity::Uncommon => &mut sug_uncommon,
@@ -185,9 +204,9 @@ fn suggest<P: AsRef<Path>>(
         };
         *selected_sug.entry(card_name).or_insert(0.0) += sugg_coeff;
     };
-    for (i, deck) in decks.iter().enumerate() {
+    for (coeff, deck) in decks.iter() {
         for (amount_deck, card_name) in deck.cards() {
-            handle_card(amount_deck, card_name, i);
+            handle_card(amount_deck, card_name, *coeff);
         }
     }
     let suggestions = vec![
@@ -201,7 +220,7 @@ fn suggest<P: AsRef<Path>>(
         let mut suggestion_group: Vec<_> = suggestion_group.0.into_iter().collect();
         suggestion_group.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // TODO: remove unwrap?, note: ascending order
         for (name, amount) in suggestion_group.iter().take(10) {
-            println!("{amount:.2} {name}");
+            println!("{:.2} {name}", amount * 1e3);
         }
         println!();
     }
@@ -301,15 +320,10 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Suggest) => suggest(&roster, &collection, &wildcards)?,
         Some(Commands::List) => {
-            let coeffs = wildcards.coefficients();
             let mut decks: Vec<_> = roster.iter().cloned().collect();
             sort_by_missing(&mut decks, &collection, &wildcards);
-            for deck in decks {
-                let val: f32 = collection
-                    .missing(&deck)
-                    .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
-                    .sum();
-                println!("{val:.1}\t {}", deck.name);
+            for (coeff, deck) in with_crafting_costs(decks, &collection, &wildcards) {
+                println!("{coeff:.2}\t {}", deck.name);
             }
         }
         Some(Commands::SetWildcards {
