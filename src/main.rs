@@ -125,13 +125,15 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, collection: Collection) -> Result
         .cloned()
         .collect();
     sort_by_missing(&mut decks, &collection);
-    let collection = collection.into_hash_map();
     let mut handle_card = |amount_deck: &u8, card_name, i: usize| {
         if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = card_name {
             return;
         }
-        let (amount_coll, rarity) = collection.get(card_name).unwrap_or(&(0, Rarity::Unknown));
-        let needed = amount_deck.saturating_sub(*amount_coll);
+        let (amount_coll, rarity) = collection
+            .get(card_name)
+            .map(|v| v[0])
+            .unwrap_or((0, Rarity::Unknown));
+        let needed = amount_deck.saturating_sub(amount_coll);
         if needed == 0 {
             return;
         }

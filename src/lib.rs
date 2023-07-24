@@ -25,15 +25,25 @@ pub struct CardData {
     pub rarity: Rarity,
 }
 
-// pub struct Missing {
-//     missing_main: Vec<CardData>,
-//     missing_side: Vec<CardData>,
-// }
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Wildcards {
+    common: u32,
+    uncommon: u32,
+    rare: u32,
+    mythic: u32,
+}
 
-pub struct Collection {
-    amounts: Vec<u8>,
-    names: Vec<String>,
-    rarities: Vec<Rarity>,
+type CollectionInner = HashMap<String, Vec<(u8, Rarity)>>;
+
+#[derive(Debug)]
+pub struct Collection(CollectionInner);
+
+impl std::ops::Deref for Collection {
+    type Target = CollectionInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Collection {
@@ -41,9 +51,7 @@ impl Collection {
         let path = path.as_ref();
         let content = fs::read_to_string(path).context("Failed to find collection csv file")?;
         let num_lines = content.lines().count();
-        let mut amounts = Vec::with_capacity(num_lines);
-        let mut names = Vec::with_capacity(num_lines);
-        let mut rarities = Vec::with_capacity(num_lines);
+        let mut collection: HashMap<String, Vec<(u8, Rarity)>> = HashMap::with_capacity(num_lines);
 
         for (i, line) in content.lines().enumerate().skip(1) {
             let err_message = || {
@@ -63,16 +71,10 @@ impl Collection {
                     _ => Rarity::Unknown,
                 })
                 .with_context(err_message)?;
-            amounts.push(amount);
-            names.push(name);
-            rarities.push(rarity);
+            collection.entry(name).or_default().push((amount, rarity));
         }
 
-        Ok(Collection {
-            amounts,
-            names,
-            rarities,
-        })
+        Ok(Collection(collection))
     }
 
     pub fn missing<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
@@ -89,51 +91,26 @@ impl Collection {
             .chain(deck.amounts_side.iter().zip(deck.names_side.iter()))
             .map(|(n, name)| {
                 // For each card in the deck
-                self.names
-                    .iter()
-                    .position(|col_name| col_name == name)
+                self.iter()
+                    .find(|(coll_name, _)| *coll_name == name)
                     .map_or_else(
                         || CardData {
                             amount: *n,
                             name: name.clone(),
                             rarity: Rarity::Unknown,
                         },
-                        |i| {
-                            let in_collection = self.amounts[i];
-                            let amount_missing = n.saturating_sub(in_collection);
+                        |(_, coll_vec)| {
+                            let &(coll_amount, rarity) =
+                                coll_vec.iter().max_by_key(|(a, _)| a).unwrap();
+                            let amount_missing = n.saturating_sub(coll_amount);
                             CardData {
                                 amount: amount_missing,
                                 name: name.clone(),
-                                rarity: self.rarities[i],
+                                rarity,
                             }
                         },
                     )
             })
-    }
-
-    pub fn into_hash_map(self) -> HashMap<String, (u8, Rarity)> {
-        let mut result = HashMap::with_capacity(self.names.len());
-        for (i, name) in self.names.into_iter().enumerate() {
-            let (other_amount, other_rarity) = (self.amounts[i], self.rarities[i]);
-            let (ref mut cur_amount, ref mut cur_rarity) =
-                result.entry(name).or_insert((other_amount, other_rarity));
-            if *cur_amount < other_amount {
-                *cur_amount = other_amount;
-                *cur_rarity = other_rarity;
-            }
-        }
-        result
-    }
-}
-
-impl std::fmt::Debug for Collection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.amounts
-            .iter()
-            .zip(self.names.iter())
-            .zip(self.rarities.iter())
-            .try_for_each(|((a, n), r)| writeln!(f, "{a} {n} ({r:?})"))?;
-        Ok(())
     }
 }
 
