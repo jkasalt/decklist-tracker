@@ -10,7 +10,7 @@ use std::{
     str::FromStr,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
     Uncommon,
@@ -20,6 +20,7 @@ pub enum Rarity {
     Unknown,
 }
 
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub struct CardData {
     pub amount: u8,
     pub name: String,

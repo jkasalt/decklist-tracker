@@ -3,8 +3,10 @@ use clap::{arg, Parser, Subcommand};
 use detr::{CardData, Collection, Deck, Rarity, RefCardData, Roster, Wildcards};
 use directories::BaseDirs;
 use either::*;
+use itertools::Itertools;
 use regex::Regex;
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},
@@ -62,6 +64,7 @@ enum Commands {
         rare: u32,
         mythic: u32,
     },
+    Booster,
     Which {
         query: String,
     },
@@ -167,12 +170,7 @@ fn suggest<P: AsRef<Path>>(
     roster: &Roster<P>,
     collection: &Collection,
     wildcards: &Wildcards,
-) -> Result<()> {
-    let mut sug_common = HashMap::new();
-    let mut sug_uncommon = HashMap::new();
-    let mut sug_rare = HashMap::new();
-    let mut sug_mythic = HashMap::new();
-
+) -> Result<HashMap<CardData, f64>> {
     let mut decks: Vec<_> = roster
         .iter()
         .filter(|deck| collection.missing(deck).count() > 1)
@@ -181,54 +179,24 @@ fn suggest<P: AsRef<Path>>(
 
     sort_by_missing(&mut decks, collection, wildcards);
     let decks = with_crafting_costs(decks, collection, wildcards);
+    let mut suggestions = HashMap::new();
 
     let mut handle_card = |amount_deck: &u8, card_name, deck_coeff: f32| {
         if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = card_name {
             return;
         }
-        // For cards with multiple versions, get the one for which the wildcards cost is the least impactful
         let card_group = collection.get(card_name);
-
+        // For cards with multiple versions, get the one for which the wildcards cost is the least impactful
         let card_data = smart_amount(card_group, wildcards);
         let needed = amount_deck.saturating_sub(card_data.amount);
-        if needed == 0 {
-            return;
-        }
-        let sugg_coeff = needed as f64 / deck_coeff as f64;
-        let selected_sug = match card_data.rarity {
-            Rarity::Common => &mut sug_common,
-            Rarity::Uncommon => &mut sug_uncommon,
-            Rarity::Rare => &mut sug_rare,
-            Rarity::Mythic => &mut sug_mythic,
-            Rarity::Unknown => {
-                eprintln!("Warning: unknown card encountered ({card_name})");
-                return;
-            }
-            Rarity::Land => return,
-        };
-        *selected_sug.entry(card_name).or_insert(0.0) += sugg_coeff;
+        *suggestions.entry(card_data).or_default() += needed as f64 / deck_coeff as f64;
     };
     for (coeff, deck) in decks.iter() {
         for (amount_deck, card_name) in deck.cards() {
             handle_card(amount_deck, card_name, *coeff);
         }
     }
-    let suggestions = vec![
-        (sug_common, "Common"),
-        (sug_uncommon, "Uncommon"),
-        (sug_rare, "Rare"),
-        (sug_mythic, "Mythic Rare"),
-    ];
-    for suggestion_group in suggestions {
-        println!("{}", suggestion_group.1);
-        let mut suggestion_group: Vec<_> = suggestion_group.0.into_iter().collect();
-        suggestion_group.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // TODO: remove unwrap?, note: ascending order
-        for (name, amount) in suggestion_group.iter().take(10) {
-            println!("{:.2} {name}", amount * 1e3);
-        }
-        println!();
-    }
-    Ok(())
+    Ok(suggestions)
 }
 
 fn add_from_file<P: AsRef<Path>>(
@@ -284,6 +252,18 @@ fn main() -> anyhow::Result<()> {
     let collection = Collection::from_csv(&collection_path)
         .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
     match cli.command {
+        Some(Commands::Booster) => {
+            // Get suggestion coeffs
+            let sugg_coeffs = suggest(&roster, &collection, &wildcards)?;
+            let mut set_sugg = HashMap::new();
+            for (card_data, coeff) in sugg_coeffs {
+                *set_sugg.entry(card_data.set_name).or_insert(0.0) += coeff;
+            }
+            let mut set_sugg = set_sugg.iter().collect_vec();
+            set_sugg
+                .sort_unstable_by(|(_, coeff1), (_, coeff2)| coeff2.partial_cmp(coeff1).unwrap());
+            println!("{set_sugg:#?}");
+        }
         Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
@@ -333,7 +313,38 @@ fn main() -> anyhow::Result<()> {
                 ))?;
             deck.name = to_name;
         }
-        Some(Commands::Suggest) => suggest(&roster, &collection, &wildcards)?,
+        Some(Commands::Suggest) => {
+            let sugg_coeffs = suggest(&roster, &collection, &wildcards)?;
+            let mut sug_common = HashMap::new();
+            let mut sug_uncommon = HashMap::new();
+            let mut sug_rare = HashMap::new();
+            let mut sug_mythic = HashMap::new();
+            for (card_data, coeff) in sugg_coeffs.iter() {
+                let selected_sugg = match card_data.rarity {
+                    Rarity::Common => &mut sug_common,
+                    Rarity::Uncommon => &mut sug_uncommon,
+                    Rarity::Rare => &mut sug_rare,
+                    Rarity::Mythic => &mut sug_mythic,
+                    _ => continue,
+                };
+                *selected_sugg.entry(card_data).or_insert(0.0) += coeff;
+            }
+            let suggestions = vec![
+                (sug_common, "Common"),
+                (sug_uncommon, "Uncommon"),
+                (sug_rare, "Rare"),
+                (sug_mythic, "Mythic Rare"),
+            ];
+            for suggestion_group in suggestions {
+                println!("{}", suggestion_group.1);
+                let mut suggestion_group: Vec<_> = suggestion_group.0.into_iter().collect();
+                suggestion_group.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // TODO: remove unwrap?, note: ascending order
+                for (card_data, amount) in suggestion_group.iter().take(10) {
+                    println!("{:.2} {}", amount * 1e3, card_data.name);
+                }
+                println!();
+            }
+        }
         Some(Commands::List) => {
             let mut decks: Vec<_> = roster.iter().cloned().collect();
             sort_by_missing(&mut decks, &collection, &wildcards);
