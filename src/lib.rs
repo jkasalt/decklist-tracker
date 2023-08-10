@@ -2,14 +2,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Borrow,
     collections::HashMap,
     fs::{self, File},
     io::Write,
     path::Path,
     str::FromStr,
 };
-
-mod card_getter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
@@ -25,6 +24,36 @@ pub struct CardData {
     pub amount: u8,
     pub name: String,
     pub rarity: Rarity,
+    pub set_name: String,
+}
+
+impl CardData {
+    fn as_ref(&self) -> RefCardData {
+        RefCardData {
+            amount: &self.amount,
+            name: &self.name,
+            rarity: &self.rarity,
+            set_name: &self.set_name,
+        }
+    }
+}
+
+pub struct RefCardData<'a> {
+    pub amount: &'a u8,
+    pub name: &'a str,
+    pub rarity: &'a Rarity,
+    pub set_name: &'a str,
+}
+
+impl<'a> RefCardData<'a> {
+    pub fn to_owned(&self) -> CardData {
+        CardData {
+            amount: *self.amount,
+            name: self.name.to_owned(),
+            rarity: *self.rarity,
+            set_name: self.set_name.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -77,17 +106,12 @@ impl Wildcards {
     }
 }
 
-type CollectionInner = HashMap<String, Vec<(u8, Rarity)>>;
-
 #[derive(Debug)]
-pub struct Collection(CollectionInner);
-
-impl std::ops::Deref for Collection {
-    type Target = CollectionInner;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+pub struct Collection {
+    names: Vec<String>,
+    amounts: Vec<u8>,
+    rarities: Vec<Rarity>,
+    sets: Vec<String>,
 }
 
 impl Collection {
@@ -95,7 +119,10 @@ impl Collection {
         let path = path.as_ref();
         let content = fs::read_to_string(path).context("Failed to find collection csv file")?;
         let num_lines = content.lines().count();
-        let mut collection: HashMap<String, Vec<(u8, Rarity)>> = HashMap::with_capacity(num_lines);
+        let mut names = Vec::with_capacity(num_lines);
+        let mut amounts = Vec::with_capacity(num_lines);
+        let mut rarities = Vec::with_capacity(num_lines);
+        let mut sets = Vec::with_capacity(num_lines);
 
         for (i, line) in content.lines().enumerate().skip(1) {
             let err_message = || {
@@ -104,8 +131,9 @@ impl Collection {
             let mut elements = line.split(';');
             let amount = elements.next().with_context(err_message)?.parse()?;
             let name = elements.next().with_context(err_message)?.to_owned();
+            let set = elements.next().with_context(err_message)?.to_owned();
             let rarity = elements
-                .nth(2)
+                .nth(1)
                 .map(|s| match s {
                     "common" => Rarity::Common,
                     "uncommon" => Rarity::Uncommon,
@@ -115,10 +143,38 @@ impl Collection {
                     _ => Rarity::Unknown,
                 })
                 .with_context(err_message)?;
-            collection.entry(name).or_default().push((amount, rarity));
+            names.push(name);
+            amounts.push(amount);
+            sets.push(set);
+            rarities.push(rarity);
         }
 
-        Ok(Collection(collection))
+        Ok(Collection {
+            names,
+            amounts,
+            rarities,
+            sets,
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = RefCardData> {
+        self.amounts
+            .iter()
+            .zip(self.names.iter())
+            .zip(self.rarities.iter())
+            .zip(self.sets.iter())
+            .map(|(((amount, name), rarity), set_name)| RefCardData {
+                amount,
+                name,
+                rarity,
+                set_name,
+            })
+    }
+
+    pub fn get(&self, s: &str) -> Vec<RefCardData> {
+        self.iter()
+            .filter(|card_data| card_data.name == s)
+            .collect_vec()
     }
 
     pub fn missing<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
@@ -133,27 +189,25 @@ impl Collection {
                 )
             })
             .chain(deck.amounts_side.iter().zip(deck.names_side.iter()))
-            .map(|(n, name)| {
-                // For each card in the deck
-                self.iter()
-                    .find(|(coll_name, _)| *coll_name == name)
-                    .map_or_else(
-                        || CardData {
-                            amount: *n,
-                            name: name.clone(),
-                            rarity: Rarity::Unknown,
-                        },
-                        |(_, coll_vec)| {
-                            let &(coll_amount, rarity) =
-                                coll_vec.iter().max_by_key(|(a, _)| a).unwrap();
-                            let amount_missing = n.saturating_sub(coll_amount);
-                            CardData {
-                                amount: amount_missing,
-                                name: name.clone(),
-                                rarity,
-                            }
-                        },
-                    )
+            // For each card in the deck
+            .map(|(deck_amount, name)| {
+                let card_group: Vec<_> = self
+                    .iter()
+                    .filter(|refcard_data| refcard_data.name == name)
+                    .collect();
+                let owned_amount = card_group.iter().map(|card_data| card_data.amount).sum();
+                let (set_name, lowest_rarity) = card_group
+                    .iter()
+                    .map(|card_data| (card_data.set_name, card_data.rarity))
+                    .min_by_key(|(_, rarity)| *rarity)
+                    .unwrap_or(("???", &Rarity::Unknown));
+                let missing_amout = deck_amount.saturating_sub(owned_amount);
+                CardData {
+                    amount: missing_amout,
+                    name: name.to_owned(),
+                    rarity: *lowest_rarity,
+                    set_name: set_name.to_string(),
+                }
             })
     }
 }

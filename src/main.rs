@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
-use detr::{CardData, Collection, Deck, Rarity, Roster, Wildcards};
+use detr::{CardData, Collection, Deck, Rarity, RefCardData, Roster, Wildcards};
 use directories::BaseDirs;
 use either::*;
 use regex::Regex;
@@ -80,7 +80,7 @@ fn with_crafting_costs(
                 .missing(&deck)
                 .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
                 .sum();
-            (val.powi(2), deck)
+            (val, deck)
         })
         .collect()
 }
@@ -146,20 +146,21 @@ fn missing<P: AsRef<Path>>(
     Ok(())
 }
 
-fn smart_amount(versions: &[(u8, Rarity)], wildcards: &Wildcards) -> (u8, Rarity) {
-    if let Some(&(amount, rarity)) = versions.iter().find(|(amount, _)| *amount == 4) {
-        return (amount, rarity);
+fn smart_amount(versions: Vec<RefCardData>, wildcards: &Wildcards) -> CardData {
+    if let Some(card_data) = versions.iter().find(|card_data| *card_data.amount == 4) {
+        return card_data.to_owned();
     }
-    *versions
+    versions
         .iter()
-        .min_by(|(amount1, rarity1), (amount2, rarity2)| {
-            let w1 = wildcards.select(rarity1);
-            let w2 = wildcards.select(rarity2);
-            ((4 - amount1) as f64 / w1 as f64)
-                .partial_cmp(&((4 - amount2) as f64 / w2 as f64))
+        .min_by(|card_data1, card_data2| {
+            let w1 = wildcards.select(card_data1.rarity);
+            let w2 = wildcards.select(card_data2.rarity);
+            ((4 - card_data1.amount) as f64 / w1 as f64)
+                .partial_cmp(&((4 - card_data2.amount) as f64 / w2 as f64))
                 .unwrap()
         })
         .unwrap()
+        .to_owned()
 }
 
 fn suggest<P: AsRef<Path>>(
@@ -186,16 +187,15 @@ fn suggest<P: AsRef<Path>>(
             return;
         }
         // For cards with multiple versions, get the one for which the wildcards cost is the least impactful
-        let (amount_coll, rarity) = collection
-            .get(card_name)
-            .map(|v| smart_amount(v, wildcards))
-            .unwrap_or((0, Rarity::Unknown));
-        let needed = amount_deck.saturating_sub(amount_coll);
+        let card_group = collection.get(card_name);
+
+        let card_data = smart_amount(card_group, wildcards);
+        let needed = amount_deck.saturating_sub(card_data.amount);
         if needed == 0 {
             return;
         }
         let sugg_coeff = needed as f64 / deck_coeff as f64;
-        let selected_sug = match rarity {
+        let selected_sug = match card_data.rarity {
             Rarity::Common => &mut sug_common,
             Rarity::Uncommon => &mut sug_uncommon,
             Rarity::Rare => &mut sug_rare,
