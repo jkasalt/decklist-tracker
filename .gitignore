@@ -1,0 +1,7 @@
+/target
+Cargo.lock
+catalogue.json
+collection.csv
+deification_prison.txt
+mtga-tracker-daemon/
+roster.json
