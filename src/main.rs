@@ -3,6 +3,7 @@ use clap::{arg, Parser, Subcommand};
 use detr::{CardData, Collection, Deck, Rarity, Roster, Wildcards};
 use directories::BaseDirs;
 use either::*;
+use regex::Regex;
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -61,6 +62,9 @@ enum Commands {
         rare: u32,
         mythic: u32,
     },
+    Which {
+        query: String,
+    },
 }
 
 fn with_crafting_costs(
@@ -76,7 +80,7 @@ fn with_crafting_costs(
                 .missing(&deck)
                 .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
                 .sum();
-            (val, deck)
+            (val.powi(2), deck)
         })
         .collect()
 }
@@ -281,6 +285,17 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
     match cli.command {
         Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
+        Some(Commands::Which { query }) => {
+            let re = Regex::new(&query)?;
+            for deck in roster.iter() {
+                for (_, card_name) in deck.cards() {
+                    let card_name = card_name.to_lowercase();
+                    if re.is_match(&card_name) {
+                        println!("{}\t{}", deck.name, card_name);
+                    }
+                }
+            }
+        }
         Some(Commands::Show { deck_name }) => roster
             .iter()
             .find(|in_roster| deck_name == in_roster.name)

@@ -9,6 +9,8 @@ use std::{
     str::FromStr,
 };
 
+mod card_getter;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
