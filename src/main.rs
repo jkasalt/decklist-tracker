@@ -6,7 +6,6 @@ use either::*;
 use itertools::Itertools;
 use regex::Regex;
 use std::{
-    cmp::Reverse,
     collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},

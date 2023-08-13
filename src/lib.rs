@@ -2,8 +2,6 @@ use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Borrow,
-    collections::HashMap,
     fs::{self, File},
     io::Write,
     path::Path,
