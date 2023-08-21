@@ -75,6 +75,7 @@ fn with_crafting_costs(
     wildcards: &Wildcards,
 ) -> Vec<(f32, Deck)> {
     let coeffs = wildcards.coefficients();
+    let closeness_cap = 300.0;
     decks
         .into_iter()
         .map(|deck| {
@@ -82,7 +83,7 @@ fn with_crafting_costs(
                 .missing(&deck)
                 .map(|card_data| f32::from(card_data.amount) * coeffs.select(&card_data.rarity))
                 .sum();
-            (val, deck)
+            (val.powi(2) / closeness_cap, deck)
         })
         .collect()
 }
@@ -148,9 +149,17 @@ fn missing<P: AsRef<Path>>(
     Ok(())
 }
 
-fn smart_amount(versions: Vec<RefCardData>, wildcards: &Wildcards) -> CardData {
-    if let Some(card_data) = versions.iter().find(|card_data| *card_data.amount == 4) {
-        return card_data.to_owned();
+fn smart_amount(versions: Vec<RefCardData>, wildcards: &Wildcards) -> Result<CardData> {
+    let card_amount = versions
+        .iter()
+        .map(|card_data| *card_data.amount)
+        .sum::<u8>();
+    if card_amount >= 4 {
+        let ref_data = versions.get(0).ok_or(anyhow!("Empty card versions vec"))?;
+        return Ok(CardData {
+            amount: 4,
+            ..ref_data.clone().to_owned()
+        });
     }
     versions
         .iter()
@@ -161,8 +170,8 @@ fn smart_amount(versions: Vec<RefCardData>, wildcards: &Wildcards) -> CardData {
                 .partial_cmp(&((4 - card_data2.amount) as f64 / w2 as f64))
                 .unwrap()
         })
-        .unwrap()
-        .to_owned()
+        .map(|ref_data| ref_data.to_owned())
+        .ok_or(anyhow!("Failed to find smart card amount for {versions:?}"))
 }
 
 fn suggest<P: AsRef<Path>>(
@@ -180,19 +189,23 @@ fn suggest<P: AsRef<Path>>(
     let decks = with_crafting_costs(decks, collection, wildcards);
     let mut suggestions = HashMap::new();
 
-    let mut handle_card = |amount_deck: &u8, card_name, deck_coeff: f32| {
+    let mut handle_card = |amount_deck: &u8, card_name, deck_coeff: f32| -> Result<()> {
         if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = card_name {
-            return;
+            return Ok(());
         }
-        let card_group = collection.get(card_name);
+        let card_group = collection
+            .get(card_name)
+            .ok_or(anyhow!("Failed to find card {card_name} in collection"))?;
         // For cards with multiple versions, get the one for which the wildcards cost is the least impactful
-        let card_data = smart_amount(card_group, wildcards);
+        let card_data = smart_amount(card_group, wildcards)
+            .with_context(|| format!("When computing smart amount for {card_name}"))?;
         let needed = amount_deck.saturating_sub(card_data.amount);
         *suggestions.entry(card_data).or_default() += needed as f64 / deck_coeff as f64;
+        Ok(())
     };
     for (coeff, deck) in decks.iter() {
         for (amount_deck, card_name) in deck.cards() {
-            handle_card(amount_deck, card_name, *coeff);
+            handle_card(amount_deck, card_name, *coeff)?;
         }
     }
     Ok(suggestions)
@@ -338,7 +351,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", suggestion_group.1);
                 let mut suggestion_group: Vec<_> = suggestion_group.0.into_iter().collect();
                 suggestion_group.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap()); // TODO: remove unwrap?, note: ascending order
-                for (card_data, amount) in suggestion_group.iter().take(10) {
+                for (card_data, amount) in suggestion_group.iter().take(20) {
                     println!("{:.2} {}", amount * 1e3, card_data.name);
                 }
                 println!();

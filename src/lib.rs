@@ -8,6 +8,8 @@ use std::{
     str::FromStr,
 };
 
+mod card_getter;
+
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
@@ -37,6 +39,7 @@ impl CardData {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RefCardData<'a> {
     pub amount: &'a u8,
     pub name: &'a str,
@@ -170,10 +173,16 @@ impl Collection {
             })
     }
 
-    pub fn get(&self, s: &str) -> Vec<RefCardData> {
-        self.iter()
+    pub fn get(&self, s: &str) -> Option<Vec<RefCardData>> {
+        let found = self
+            .iter()
             .filter(|card_data| card_data.name == s)
-            .collect_vec()
+            .collect_vec();
+        if found.is_empty() {
+            None
+        } else {
+            Some(found)
+        }
     }
 
     pub fn missing<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
