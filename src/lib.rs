@@ -9,6 +9,7 @@ use std::{
 };
 
 mod card_getter;
+mod mtga_id_translator;
 
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
@@ -29,7 +30,7 @@ pub struct CardData {
 }
 
 impl CardData {
-    fn as_ref(&self) -> RefCardData {
+    pub fn as_ref(&self) -> RefCardData {
         RefCardData {
             amount: &self.amount,
             name: &self.name,
@@ -75,6 +76,24 @@ impl WildcardCoefficients {
             Rarity::Mythic => self.mythic,
             Rarity::Land | Rarity::Unknown => 0.0,
         }
+    }
+
+    pub fn order(&self) -> [Rarity; 5] {
+        use Rarity as R;
+        let common = (R::Common, self.common);
+        let uncommon = (R::Uncommon, self.uncommon);
+        let rare = (R::Rare, self.rare);
+        let mythic = (R::Mythic, self.mythic);
+
+        let mut rarities = [common, uncommon, rare, mythic];
+        rarities.sort_unstable_by(|(_, c1), (_, c2)| c1.partial_cmp(c2).unwrap());
+        [
+            rarities[0].0,
+            rarities[1].0,
+            rarities[2].0,
+            rarities[3].0,
+            R::Land,
+        ]
     }
 }
 
@@ -165,15 +184,25 @@ impl Collection {
             .zip(self.names.iter())
             .zip(self.rarities.iter())
             .zip(self.sets.iter())
-            .map(|(((amount, name), rarity), set_name)| RefCardData {
-                amount,
-                name,
-                rarity,
-                set_name,
-            })
+            .map(
+                |(((amount, name), rarity), set_name)| RefCardData {
+                    amount,
+                    name,
+                    rarity,
+                    set_name,
+                },
+            )
     }
 
-    pub fn get(&self, s: &str) -> Option<Vec<RefCardData>> {
+    pub fn get<'a>(&'a self, s: &'a str) -> Option<Vec<RefCardData>> {
+        if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = s {
+            return Some(vec![RefCardData {
+                amount: &u8::MAX,
+                name: s,
+                rarity: &Rarity::Land,
+                set_name: "land",
+            }]);
+        }
         let found = self
             .iter()
             .filter(|card_data| card_data.name == s)
@@ -399,5 +428,76 @@ impl<P: AsRef<Path>> Drop for Roster<P> {
     fn drop(&mut self) {
         self.write()
             .unwrap_or_else(|err| eprintln!("ERROR: while closing roster, {err}"));
+    }
+}
+
+#[derive(Debug)]
+pub struct Inventory {
+    collection: Collection,
+    coeffs: WildcardCoefficients,
+}
+
+impl Inventory {
+    pub fn open<P1, P2>(collection_path: P1, wildcards_path: P2) -> Result<Self>
+    where
+        P1: AsRef<Path> + std::fmt::Debug,
+        P2: AsRef<Path> + std::fmt::Debug,
+    {
+        let collection = Collection::from_csv(&collection_path)
+            .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
+        let wildcards: Wildcards = if !wildcards_path.as_ref().exists() {
+            Wildcards::default()
+        } else {
+            serde_json::from_reader(File::open(&wildcards_path)?).unwrap_or_default()
+        };
+        let coeffs = wildcards.coefficients();
+        Ok(Inventory { collection, coeffs })
+    }
+
+    pub fn card_cost(&self, card_name: &str) -> Result<f32> {
+        let cost = self.coeffs.select(&self.cheapest_rarity(card_name)?);
+        Ok(cost)
+    }
+
+    pub fn cheapest_rarity(&self, card_name: &str) -> Result<Rarity> {
+        let card_group = self
+            .collection
+            .get(card_name)
+            .ok_or(anyhow!("Failed to find card {card_name} in collection"))?;
+        let group_rarities = card_group
+            .iter()
+            .map(|card_data| card_data.rarity)
+            .collect_vec();
+        let ordered_rarities = self.coeffs.order();
+        let cheapest_rarity = ordered_rarities
+            .iter()
+            .find(|r| group_rarities.contains(r))
+            .unwrap();
+        Ok(*cheapest_rarity)
+    }
+
+    pub fn card_amount(&self, card_name: &str) -> Result<u8> {
+        let in_collection = self
+            .collection
+            .get(card_name)
+            .ok_or(anyhow!("Failed to find card {card_name} in collection"))?
+            .iter()
+            .map(|card_data| *card_data.amount)
+            .sum();
+        Ok(std::cmp::min(in_collection, 4))
+    }
+
+    pub fn deck_cost(&self, deck: &Deck) -> Result<f32> {
+        let mut result = 0.0;
+        for (amount, card_name) in deck.cards() {
+            let missing = amount.saturating_sub(self.card_amount(card_name)?);
+            result += missing as f32 * self.card_cost(card_name)?;
+        }
+        let closeness_bound = 300.0;
+        Ok(result.powi(2) / closeness_bound)
+    }
+
+    pub fn missing_cards<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
+        self.collection.missing(deck)
     }
 }
