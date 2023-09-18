@@ -67,11 +67,12 @@ enum Commands {
     Which {
         query: String,
     },
+    PrintCoeffs,
 }
 
 fn export<P: AsRef<Path>>(deck_name: &str, roster: &Roster<P>) -> Result<()> {
     let deck = roster
-        .iter()
+        .decks()
         .find(|in_roster| in_roster.name == deck_name)
         .with_context(|| format!("Failed to find deck {deck_name} in roster"))?;
     clipboard_win::set_clipboard(clipboard_win::formats::Unicode, deck.to_string())
@@ -85,7 +86,7 @@ fn missing<P: AsRef<Path>>(
     inventory: &Inventory,
 ) -> Result<()> {
     let deck = roster
-        .iter()
+        .decks()
         .find(|in_cat| in_cat.name == deck_name)
         .ok_or(anyhow!("Cannot find deck {deck_name} in deck roster"))?;
     let missing_cards = inventory.missing_cards(deck);
@@ -121,20 +122,12 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, inventory: &Inventory) -> Result<
     let mut sug_rare = HashMap::new();
     let mut sug_mythic = HashMap::new();
     let decks: Vec<_> = roster
-        .iter()
+        .decks()
         .filter(|deck| inventory.missing_cards(deck).count() > 1)
         .collect();
 
     for deck in decks {
         for (deck_amount, card_name) in deck.cards() {
-            let card_cost = inventory
-                .card_cost(card_name)
-                .context("When computing card cost")?;
-            let missing = deck_amount.saturating_sub(
-                inventory
-                    .card_amount(card_name)
-                    .context("When computing card amount")?,
-            );
             let rarity = inventory
                 .cheapest_rarity(card_name)
                 .context("When computing rarity")?;
@@ -148,7 +141,8 @@ fn suggest<P: AsRef<Path>>(roster: &Roster<P>, inventory: &Inventory) -> Result<
                 Rarity::Mythic => &mut sug_mythic,
                 _ => continue,
             };
-            let sugg_coeff = card_cost * missing as f32 / deck_cost;
+            let sugg_coeff =
+                inventory.card_cost_considering_deck(card_name, deck_amount)? / deck_cost;
 
             *selected_sugg.entry(card_name).or_insert(0.0) += sugg_coeff;
         }
@@ -220,12 +214,23 @@ fn main() -> anyhow::Result<()> {
     let inventory = Inventory::open(&collection_path, &wildcards_path)?;
     match cli.command {
         Some(Commands::Booster) => {
-            unimplemented!()
+            // For each set, sums up the card values
+            let mut set_value = HashMap::new();
+            for deck in roster.decks() {
+                for (&amount, card_name) in deck.cards() {
+                    let card_cheapest_version = inventory.cheapest_version(card_name)?;
+                    let set_name = card_cheapest_version.set_name;
+                    let card_cost = inventory.card_cost(card_name)?;
+                    let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
+                    *set_value.entry(set_name).or_insert(0.0) += card_cost * missing_amount as f32;
+                }
+            }
+            println!("{set_value:#?}");
         }
         Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
-            for deck in roster.iter() {
+            for deck in roster.decks() {
                 for (_, card_name) in deck.cards() {
                     let card_name = card_name.to_lowercase();
                     if re.is_match(&card_name) {
@@ -235,7 +240,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Show { deck_name }) => roster
-            .iter()
+            .decks()
             .find(|in_roster| deck_name == in_roster.name)
             .map(|deck| println!("{deck}"))
             .ok_or(anyhow!(
@@ -264,7 +269,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Rename { from_name, to_name }) => {
             let deck = roster
-                .iter_mut()
+                .decks_mut()
                 .find(|in_roster| in_roster.name == from_name)
                 .ok_or(anyhow!(
                     "Could not find {from_name} in roster {roster_path:?}"
@@ -276,7 +281,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::List) => {
             let mut decks = roster
-                .iter()
+                .decks()
                 .cloned()
                 .map(|deck| (inventory.deck_cost(&deck).unwrap(), deck))
                 .collect_vec();
@@ -299,6 +304,7 @@ fn main() -> anyhow::Result<()> {
             };
             fs::write(wildcards_path, serde_json::to_string(&wildcards)?)?;
         }
+        Some(Commands::PrintCoeffs) => println!("{:?}", inventory.wildcard_coeffs()),
         None => {}
     }
     Ok(())

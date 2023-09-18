@@ -8,9 +8,6 @@ use std::{
     str::FromStr,
 };
 
-mod card_getter;
-mod mtga_id_translator;
-
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
@@ -184,14 +181,12 @@ impl Collection {
             .zip(self.names.iter())
             .zip(self.rarities.iter())
             .zip(self.sets.iter())
-            .map(
-                |(((amount, name), rarity), set_name)| RefCardData {
-                    amount,
-                    name,
-                    rarity,
-                    set_name,
-                },
-            )
+            .map(|(((amount, name), rarity), set_name)| RefCardData {
+                amount,
+                name,
+                rarity,
+                set_name,
+            })
     }
 
     pub fn get<'a>(&'a self, s: &'a str) -> Option<Vec<RefCardData>> {
@@ -377,10 +372,10 @@ pub struct Roster<P: AsRef<Path>> {
 }
 
 impl<P: AsRef<Path>> Roster<P> {
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<Deck> {
+    pub fn decks_mut(&mut self) -> std::slice::IterMut<Deck> {
         self.decks.iter_mut()
     }
-    pub fn iter(&self) -> std::slice::Iter<Deck> {
+    pub fn decks(&self) -> std::slice::Iter<Deck> {
         self.decks.iter()
     }
 
@@ -406,7 +401,7 @@ impl<P: AsRef<Path>> Roster<P> {
 
     pub fn remove_deck(&mut self, name: &str) -> Result<()> {
         let i = self
-            .iter()
+            .decks()
             .position(|deck| deck.name == name)
             .ok_or(anyhow!("The query `{name}` found no matching deck"))
             .context("Failed to remove deck")?;
@@ -420,7 +415,7 @@ impl<P: AsRef<Path>> Roster<P> {
     }
 
     pub fn deck_list(&self) -> impl Iterator<Item = &str> {
-        self.iter().map(|deck| deck.name.as_str())
+        self.decks().map(|deck| deck.name.as_str())
     }
 }
 
@@ -459,6 +454,22 @@ impl Inventory {
         Ok(cost)
     }
 
+    /// This function computes the importance of a card, with regard to how many
+    /// copies a deck plays. A card that is played as a four-of will always be
+    /// more important than a card that is played as a single. This is a
+    /// helpful heuristic most of the time. However, care must be taken when
+    /// considering some decks that play important single cards, such as
+    /// Approach of the second sun, or Atraxa reanimator decks.
+    pub fn card_cost_considering_deck(&self, card_name: &str, &in_deck_amount: &u8) -> Result<f32> {
+        let in_collection_amount = self.card_amount(card_name)?;
+        let missing = in_deck_amount.saturating_sub(in_collection_amount);
+        if missing == 0 {
+            Ok(0.0)
+        } else {
+            Ok(self.card_cost(card_name)? * in_deck_amount as f32)
+        }
+    }
+
     pub fn cheapest_rarity(&self, card_name: &str) -> Result<Rarity> {
         let card_group = self
             .collection
@@ -474,6 +485,19 @@ impl Inventory {
             .find(|r| group_rarities.contains(r))
             .unwrap();
         Ok(*cheapest_rarity)
+    }
+
+    pub fn cheapest_version(&self, card_name: &str) -> Result<CardData> {
+        let cheapest_rarity = self.cheapest_rarity(card_name)?;
+        let card_group = self
+            .collection
+            .get(card_name)
+            .ok_or(anyhow!("Cannot find {card_name} in collection"))?;
+        let cheapest_version = card_group
+            .iter()
+            .find(|card_data| *card_data.rarity == cheapest_rarity)
+            .unwrap();
+        Ok(cheapest_version.to_owned())
     }
 
     pub fn card_amount(&self, card_name: &str) -> Result<u8> {
@@ -493,11 +517,15 @@ impl Inventory {
             let missing = amount.saturating_sub(self.card_amount(card_name)?);
             result += missing as f32 * self.card_cost(card_name)?;
         }
-        let closeness_bound = 300.0;
+        let closeness_bound = 70.0;
         Ok(result.powi(2) / closeness_bound)
     }
 
     pub fn missing_cards<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
         self.collection.missing(deck)
+    }
+
+    pub fn wildcard_coeffs(&self) -> &WildcardCoefficients {
+        &self.coeffs
     }
 }
