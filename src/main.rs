@@ -21,6 +21,9 @@ struct Cli {
     #[arg(short, long, global = true)]
     collection_path: Option<String>,
 
+    #[arg(long, global = true)]
+    ignore_sb: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -84,12 +87,13 @@ fn missing<P: AsRef<Path>>(
     deck_name: &str,
     roster: &Roster<P>,
     inventory: &Inventory,
+    ignore_sideboard: bool,
 ) -> Result<()> {
     let deck = roster
         .decks()
         .find(|in_cat| in_cat.name == deck_name)
         .ok_or(anyhow!("Cannot find deck {deck_name} in deck roster"))?;
-    let missing_cards = inventory.missing_cards(deck);
+    let missing_cards = inventory.missing_cards(deck, ignore_sideboard);
 
     let mut missing_cards: Vec<_> = missing_cards.collect();
     missing_cards.sort_by_key(|m| m.rarity);
@@ -116,23 +120,27 @@ fn missing<P: AsRef<Path>>(
     Ok(())
 }
 
-fn suggest<P: AsRef<Path>>(roster: &Roster<P>, inventory: &Inventory) -> Result<()> {
+fn suggest<P: AsRef<Path>>(
+    roster: &Roster<P>,
+    inventory: &Inventory,
+    ignore_sideboard: bool,
+) -> Result<()> {
     let mut sug_common = HashMap::new();
     let mut sug_uncommon = HashMap::new();
     let mut sug_rare = HashMap::new();
     let mut sug_mythic = HashMap::new();
     let decks: Vec<_> = roster
         .decks()
-        .filter(|deck| inventory.missing_cards(deck).count() > 1)
+        .filter(|deck| inventory.missing_cards(deck, ignore_sideboard).count() > 1)
         .collect();
 
     for deck in decks {
-        for (deck_amount, card_name) in deck.cards() {
+        for (deck_amount, card_name) in deck.cards(ignore_sideboard) {
             let rarity = inventory
                 .cheapest_rarity(card_name)
                 .context("When computing rarity")?;
             let deck_cost = inventory
-                .deck_cost(deck)
+                .deck_cost(deck, ignore_sideboard)
                 .context("When computing deck cost")?;
             let selected_sugg = match rarity {
                 Rarity::Common => &mut sug_common,
@@ -212,12 +220,13 @@ fn main() -> anyhow::Result<()> {
     let mut roster = Roster::open(&roster_path)
         .with_context(|| format!("Failed to open deck roster with path {roster_path:?}"))?;
     let inventory = Inventory::open(&collection_path, &wildcards_path)?;
+    let ignore_sideboard = cli.ignore_sb;
     match cli.command {
         Some(Commands::Booster) => {
             // For each set, sums up the card values
             let mut set_value = HashMap::new();
             for deck in roster.decks() {
-                for (&amount, card_name) in deck.cards() {
+                for (&amount, card_name) in deck.cards(ignore_sideboard) {
                     let card_cheapest_version = inventory.cheapest_version(card_name)?;
                     let set_name = card_cheapest_version.set_name;
                     let card_cost = inventory.card_cost(card_name)?;
@@ -231,7 +240,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
             for deck in roster.decks() {
-                for (_, card_name) in deck.cards() {
+                for (_, card_name) in deck.cards(ignore_sideboard) {
                     let card_name = card_name.to_lowercase();
                     if re.is_match(&card_name) {
                         println!("{}\t{}", deck.name, card_name);
@@ -263,7 +272,9 @@ fn main() -> anyhow::Result<()> {
                     .name(&name);
             roster.add_deck(&deck);
         }
-        Some(Commands::Missing { deck_name }) => missing(&deck_name, &roster, &inventory)?,
+        Some(Commands::Missing { deck_name }) => {
+            missing(&deck_name, &roster, &inventory, ignore_sideboard)?
+        }
         Some(Commands::UpdateCollection { path }) => {
             std::fs::copy(path, collection_path)?;
         }
@@ -277,13 +288,13 @@ fn main() -> anyhow::Result<()> {
             deck.name = to_name;
         }
         Some(Commands::Suggest) => {
-            suggest(&roster, &inventory)?;
+            suggest(&roster, &inventory, ignore_sideboard)?;
         }
         Some(Commands::List) => {
             let mut decks = roster
                 .decks()
                 .cloned()
-                .map(|deck| (inventory.deck_cost(&deck).unwrap(), deck))
+                .map(|deck| (inventory.deck_cost(&deck, ignore_sideboard).unwrap(), deck))
                 .collect_vec();
             decks.sort_unstable_by(|(c1, _), (c2, _)| c1.partial_cmp(c2).unwrap());
             for (coeff, deck) in decks {

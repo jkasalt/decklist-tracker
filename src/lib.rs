@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use either::*;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -209,10 +210,12 @@ impl Collection {
         }
     }
 
-    pub fn missing<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
-        deck.amounts_main
-            .iter()
-            .zip(deck.names_main.iter())
+    pub fn missing<'a>(
+        &'a self,
+        deck: &'a Deck,
+        ignore_sideboard: bool,
+    ) -> impl Iterator<Item = CardData> + 'a {
+        deck.cards(ignore_sideboard)
             .filter(|(_, deck_card_name)| {
                 // Ignore basic lands
                 !matches!(
@@ -220,7 +223,6 @@ impl Collection {
                     "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
                 )
             })
-            .chain(deck.amounts_side.iter().zip(deck.names_side.iter()))
             // For each card in the deck
             .map(|(deck_amount, name)| {
                 let card_group: Vec<_> = self
@@ -357,11 +359,13 @@ impl Deck {
         fs::read_to_string(path)?.parse()
     }
 
-    pub fn cards(&self) -> impl Iterator<Item = (&u8, &String)> {
-        self.amounts_main
-            .iter()
-            .zip(self.names_main.iter())
-            .chain(self.amounts_side.iter().zip(self.names_side.iter()))
+    pub fn cards(&self, ignore_sideboard: bool) -> impl Iterator<Item = (&u8, &String)> {
+        let cards_iterator = self.amounts_main.iter().zip(self.names_main.iter());
+        if ignore_sideboard {
+            Left(cards_iterator)
+        } else {
+            Right(cards_iterator.chain(self.amounts_side.iter().zip(self.names_side.iter())))
+        }
     }
 }
 
@@ -511,18 +515,21 @@ impl Inventory {
         Ok(std::cmp::min(in_collection, 4))
     }
 
-    pub fn deck_cost(&self, deck: &Deck) -> Result<f32> {
+    pub fn deck_cost(&self, deck: &Deck, ignore_sideboard: bool) -> Result<f32> {
         let mut result = 0.0;
-        for (amount, card_name) in deck.cards() {
+        for (amount, card_name) in deck.cards(ignore_sideboard) {
             let missing = amount.saturating_sub(self.card_amount(card_name)?);
             result += missing as f32 * self.card_cost(card_name)?;
         }
-        let closeness_bound = 70.0;
-        Ok(result.powi(2) / closeness_bound)
+        Ok(result)
     }
 
-    pub fn missing_cards<'a>(&'a self, deck: &'a Deck) -> impl Iterator<Item = CardData> + 'a {
-        self.collection.missing(deck)
+    pub fn missing_cards<'a>(
+        &'a self,
+        deck: &'a Deck,
+        ignore_sideboard: bool,
+    ) -> impl Iterator<Item = CardData> + 'a {
+        self.collection.missing(deck, ignore_sideboard)
     }
 
     pub fn wildcard_coeffs(&self) -> &WildcardCoefficients {
