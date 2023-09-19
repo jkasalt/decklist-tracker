@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     fs::{self},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 #[derive(Parser)]
@@ -54,11 +55,14 @@ enum Commands {
     Export {
         deck_name: String,
     },
+    Edit {
+        deck_name: String,
+    },
     Suggest,
     List,
     Rename {
-        from_name: String,
-        to_name: String,
+        current_name: String,
+        new_name: String,
     },
     SetWildcards {
         common: u32,
@@ -74,10 +78,7 @@ enum Commands {
 }
 
 fn export<P: AsRef<Path>>(deck_name: &str, roster: &Roster<P>) -> Result<()> {
-    let deck = roster
-        .decks()
-        .find(|in_roster| in_roster.name == deck_name)
-        .with_context(|| format!("Failed to find deck {deck_name} in roster"))?;
+    let deck = roster.find(deck_name)?;
     clipboard_win::set_clipboard(clipboard_win::formats::Unicode, deck.to_string())
         .map_err(|err| anyhow!("Failed to set clipboard {err}"))?;
     Ok(())
@@ -89,10 +90,7 @@ fn missing<P: AsRef<Path>>(
     inventory: &Inventory,
     ignore_sideboard: bool,
 ) -> Result<()> {
-    let deck = roster
-        .decks()
-        .find(|in_cat| in_cat.name == deck_name)
-        .ok_or(anyhow!("Cannot find deck {deck_name} in deck roster"))?;
+    let deck = roster.find(deck_name)?;
     let missing_cards = inventory.missing_cards(deck, ignore_sideboard);
 
     let mut missing_cards: Vec<_> = missing_cards.collect();
@@ -222,6 +220,9 @@ fn main() -> anyhow::Result<()> {
     let inventory = Inventory::open(&collection_path, &wildcards_path)?;
     let ignore_sideboard = cli.ignore_sb;
     match cli.command {
+        Some(Commands::AddFromFile { deck_paths, names }) => {
+            add_from_file(&deck_paths, names.as_ref(), &mut roster)?
+        }
         Some(Commands::Booster) => {
             // For each set, sums up the card values
             let mut set_value = HashMap::new();
@@ -236,60 +237,28 @@ fn main() -> anyhow::Result<()> {
             }
             println!("{set_value:#?}");
         }
-        Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
-        Some(Commands::Which { query }) => {
-            let re = Regex::new(&query)?;
-            for deck in roster.decks() {
-                for (_, card_name) in deck.cards(ignore_sideboard) {
-                    let card_name = card_name.to_lowercase();
-                    if re.is_match(&card_name) {
-                        println!("{}\t{}", deck.name, card_name);
-                    }
-                }
+        Some(Commands::Edit { deck_name }) => {
+            let deck = roster.find(&deck_name)?;
+            let tmp_file_name = "deck.tmp";
+            fs::write(tmp_file_name, format!("{deck}").as_bytes())?;
+            // TODO: make this work on machines that don't have nvim installed ?
+            let mut child = Command::new("nvim")
+                .arg(tmp_file_name)
+                .stdin(Stdio::piped())
+                .spawn()?;
+
+            if !child.wait()?.success() {
+                eprintln!("Vim exited with an error");
             }
+
+            let modified_deck = fs::read_to_string(tmp_file_name)
+                .context("When attempting to read temp file")?
+                .parse::<Deck>()?
+                .name(&deck_name);
+            fs::remove_file(tmp_file_name)?;
+            roster.replace(&deck_name, modified_deck)?;
         }
-        Some(Commands::Show { deck_name }) => roster
-            .decks()
-            .find(|in_roster| deck_name == in_roster.name)
-            .map(|deck| println!("{deck}"))
-            .ok_or(anyhow!(
-                "Could not find {deck_name} in roster {roster_path:?}"
-            ))?,
-        Some(Commands::Remove { deck_name }) => {
-            roster
-                .remove_deck(&deck_name)
-                .context("Failed to remove deck")?;
-        }
-        Some(Commands::AddFromFile { deck_paths, names }) => {
-            add_from_file(&deck_paths, names.as_ref(), &mut roster)?
-        }
-        Some(Commands::Paste { name }) => {
-            let deck: Deck =
-                clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
-                    .map_err(|err| anyhow!("Failed to read clipboard: {err}"))?
-                    .parse::<Deck>()
-                    .context("Failed to parse deck from clipboard")?
-                    .name(&name);
-            roster.add_deck(&deck);
-        }
-        Some(Commands::Missing { deck_name }) => {
-            missing(&deck_name, &roster, &inventory, ignore_sideboard)?
-        }
-        Some(Commands::UpdateCollection { path }) => {
-            std::fs::copy(path, collection_path)?;
-        }
-        Some(Commands::Rename { from_name, to_name }) => {
-            let deck = roster
-                .decks_mut()
-                .find(|in_roster| in_roster.name == from_name)
-                .ok_or(anyhow!(
-                    "Could not find {from_name} in roster {roster_path:?}"
-                ))?;
-            deck.name = to_name;
-        }
-        Some(Commands::Suggest) => {
-            suggest(&roster, &inventory, ignore_sideboard)?;
-        }
+        Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
         Some(Commands::List) => {
             let mut decks = roster
                 .decks()
@@ -300,6 +269,31 @@ fn main() -> anyhow::Result<()> {
             for (coeff, deck) in decks {
                 println!("{coeff:.2}\t {}", deck.name);
             }
+        }
+        Some(Commands::Missing { deck_name }) => {
+            missing(&deck_name, &roster, &inventory, ignore_sideboard)?
+        }
+        Some(Commands::Paste { name }) => {
+            let deck: Deck =
+                clipboard_win::get_clipboard::<String, _>(clipboard_win::formats::Unicode)
+                    .map_err(|err| anyhow!("Failed to read clipboard: {err}"))?
+                    .parse::<Deck>()
+                    .context("Failed to parse deck from clipboard")?
+                    .name(&name);
+            roster.add_deck(&deck);
+        }
+        Some(Commands::PrintCoeffs) => println!("{:?}", inventory.wildcard_coeffs()),
+        Some(Commands::Remove { deck_name }) => {
+            roster
+                .remove_deck(&deck_name)
+                .context("Failed to remove deck")?;
+        }
+        Some(Commands::Rename {
+            current_name,
+            new_name,
+        }) => {
+            let deck = roster.find_mut(&current_name)?;
+            deck.name = new_name;
         }
         Some(Commands::SetWildcards {
             common,
@@ -315,7 +309,26 @@ fn main() -> anyhow::Result<()> {
             };
             fs::write(wildcards_path, serde_json::to_string(&wildcards)?)?;
         }
-        Some(Commands::PrintCoeffs) => println!("{:?}", inventory.wildcard_coeffs()),
+        Some(Commands::Show { deck_name }) => {
+            roster.find(&deck_name).map(|deck| println!("{deck}"))?
+        }
+        Some(Commands::Suggest) => {
+            suggest(&roster, &inventory, ignore_sideboard)?;
+        }
+        Some(Commands::UpdateCollection { path }) => {
+            std::fs::copy(path, collection_path)?;
+        }
+        Some(Commands::Which { query }) => {
+            let re = Regex::new(&query)?;
+            for deck in roster.decks() {
+                for (_, card_name) in deck.cards(ignore_sideboard) {
+                    let card_name = card_name.to_lowercase();
+                    if re.is_match(&card_name) {
+                        println!("{}\t{}", deck.name, card_name);
+                    }
+                }
+            }
+        }
         None => {}
     }
     Ok(())

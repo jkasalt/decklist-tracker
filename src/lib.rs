@@ -421,6 +421,24 @@ impl<P: AsRef<Path>> Roster<P> {
     pub fn deck_list(&self) -> impl Iterator<Item = &str> {
         self.decks().map(|deck| deck.name.as_str())
     }
+
+    pub fn find(&self, deck_name: &str) -> Result<&Deck> {
+        self.decks()
+            .find(|deck| deck.name == deck_name)
+            .ok_or(anyhow!("Could not find deck {deck_name} in roster"))
+    }
+
+    pub fn find_mut(&mut self, deck_name: &str) -> Result<&mut Deck> {
+        self.decks_mut()
+            .find(|deck| deck.name == deck_name)
+            .ok_or(anyhow!("Could not find deck {deck_name} in roster"))
+    }
+
+    pub fn replace(&mut self, deck_name: &str, deck: Deck) -> Result<()> {
+        let in_roster = self.find_mut(deck_name)?;
+        *in_roster = deck;
+        Ok(())
+    }
 }
 
 impl<P: AsRef<Path>> Drop for Roster<P> {
