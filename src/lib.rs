@@ -488,7 +488,8 @@ impl Inventory {
         if missing == 0 {
             Ok(0.0)
         } else {
-            Ok(self.card_cost(card_name)? * in_deck_amount as f32)
+            let tiebreaker_bonus = 4.0 / missing as f32;
+            Ok(self.card_cost(card_name)? * in_deck_amount as f32 + tiebreaker_bonus)
         }
     }
 
