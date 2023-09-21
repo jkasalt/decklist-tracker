@@ -17,10 +17,10 @@ use std::{
 #[command(subcommand_required = true)]
 struct Cli {
     #[arg(short, long, global = true)]
-    roster_path: Option<String>,
+    roster_path: Option<PathBuf>,
 
     #[arg(short, long, global = true)]
-    collection_path: Option<String>,
+    collection_path: Option<PathBuf>,
 
     #[arg(long, global = true)]
     ignore_sb: bool,
@@ -58,7 +58,14 @@ enum Commands {
     Edit {
         deck_name: String,
     },
-    Suggest,
+    Suggest {
+        #[arg(
+            long,
+            short,
+            help = "Will not favour cards from decks that are close to completion."
+        )]
+        equally: bool,
+    },
     List,
     Rename {
         current_name: String,
@@ -122,6 +129,7 @@ fn suggest<P: AsRef<Path>>(
     roster: &Roster<P>,
     inventory: &Inventory,
     ignore_sideboard: bool,
+    equally: bool,
 ) -> Result<()> {
     let mut sug_common = HashMap::new();
     let mut sug_uncommon = HashMap::new();
@@ -137,9 +145,13 @@ fn suggest<P: AsRef<Path>>(
             let rarity = inventory
                 .cheapest_rarity(card_name)
                 .context("When computing rarity")?;
-            let deck_cost = inventory
-                .deck_cost(deck, ignore_sideboard)
-                .context("When computing deck cost")?;
+            let deck_cost = if !equally {
+                inventory
+                    .deck_cost(deck, ignore_sideboard)
+                    .context("When computing deck cost")?
+            } else {
+                100.0
+            };
             let selected_sugg = match rarity {
                 Rarity::Common => &mut sug_common,
                 Rarity::Uncommon => &mut sug_uncommon,
@@ -208,16 +220,16 @@ fn main() -> anyhow::Result<()> {
     }
     let roster_path = cli
         .roster_path
-        .map(PathBuf::from)
         .unwrap_or_else(|| app_dir.join("roster.json"));
     let collection_path = cli
         .collection_path
-        .map(PathBuf::from)
         .unwrap_or_else(|| app_dir.join("collection.csv"));
     let wildcards_path = app_dir.join("wildcards.json");
     let mut roster = Roster::open(&roster_path)
         .with_context(|| format!("Failed to open deck roster with path {roster_path:?}"))?;
-    let inventory = Inventory::open(&collection_path, &wildcards_path)?;
+    let inventory = Inventory::open(&collection_path, &wildcards_path).with_context(|| {
+        format!("Failed to open inventory with paths {collection_path:?}, and {wildcards_path:?}")
+    })?;
     let ignore_sideboard = cli.ignore_sb;
     match cli.command {
         Some(Commands::AddFromFile { deck_paths, names }) => {
@@ -312,8 +324,8 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Show { deck_name }) => {
             roster.find(&deck_name).map(|deck| println!("{deck}"))?
         }
-        Some(Commands::Suggest) => {
-            suggest(&roster, &inventory, ignore_sideboard)?;
+        Some(Commands::Suggest { equally }) => {
+            suggest(&roster, &inventory, ignore_sideboard, equally)?;
         }
         Some(Commands::UpdateCollection { path }) => {
             std::fs::copy(path, collection_path)?;
@@ -321,10 +333,9 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
             for deck in roster.decks() {
-                for (_, card_name) in deck.cards(ignore_sideboard) {
-                    let card_name = card_name.to_lowercase();
-                    if re.is_match(&card_name) {
-                        println!("{}\t{}", deck.name, card_name);
+                for (amount, card_name) in deck.cards(ignore_sideboard) {
+                    if re.is_match(&card_name.to_lowercase()) {
+                        println!("{}\t{amount} {card_name}", deck.name);
                     }
                 }
             }
