@@ -16,13 +16,27 @@ use std::{
 #[command(author, version, about, long_about = None)]
 #[command(subcommand_required = true)]
 struct Cli {
-    #[arg(short, long, global = true)]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "What path to use for the deck roster json"
+    )]
     roster_path: Option<PathBuf>,
 
-    #[arg(short, long, global = true)]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "What path to use for the collection csv"
+    )]
     collection_path: Option<PathBuf>,
 
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Will ignore deck sideboards for calculations"
+    )]
     ignore_sb: bool,
 
     #[command(subcommand)]
@@ -62,7 +76,7 @@ enum Commands {
         #[arg(
             long,
             short,
-            help = "Will not favour cards from decks that are close to completion."
+            help = "Will not favour cards from decks that are close to completion"
         )]
         equally: bool,
     },

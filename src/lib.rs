@@ -300,11 +300,8 @@ impl FromStr for Deck {
                     parsing_mode = ParsingMode::Main;
                     continue;
                 }
-                "Sideboard" => {
+                "Sideboard" | "" => {
                     parsing_mode = ParsingMode::Side;
-                    continue;
-                }
-                "" => {
                     continue;
                 }
                 _ => {}
