@@ -1,63 +1,92 @@
-use anyhow::Result;
-use reqwest::blocking::{get, Client};
+use anyhow::{anyhow, Context, Result};
+use indicatif::ProgressBar;
+use reqwest::blocking::Client;
+use serde::Deserialize;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener};
+use std::path::Path;
 use std::process::{Child, Command};
 
-pub struct CardGetter {
-    daemon: Child,
-    _listener: TcpListener,
-    port: SocketAddr,
+use crate::mtga_id_translator::{MtgaIdTranslator, NetCardData};
+use crate::Collection;
+
+#[derive(Deserialize)]
+struct NameAmount {
+    #[serde(rename = "grpId")]
+    id: u32,
+    owned: u8,
 }
 
-impl CardGetter {
-    pub fn new() -> Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?;
-        let daemon = Command::new(
-            r"mtga-tracker-daemon\src\mtga-tracker-daemon\bin\Debug\net6.0\mtga-tracker-daemon.exe",
-        )
-        .args(["-p", &port.to_string()])
-        .spawn()?;
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CardReply {
+    cards: Vec<NameAmount>,
+    elapsed_time: u32,
+}
 
-        Ok(CardGetter {
-            daemon,
-            _listener: listener,
-            port,
+pub struct CardGetter;
+
+impl CardGetter {
+    fn address() -> &'static str {
+        "http://localhost:9000"
+    }
+
+    pub fn owned_cards<P: AsRef<Path>>(translator: &mut MtgaIdTranslator<P>) -> Result<Collection> {
+        let url = format!("{}/cards", Self::address());
+        let response = reqwest::blocking::get(url)
+            .context(
+                "Unable to get cards from daemon. Are you sure the daemon is running on port 9000?",
+            )?
+            .json()
+            .context("Unable to parse json from card daemon. Are you sure the game is running?")?;
+        let cards: Vec<NameAmount> = serde_json::from_value::<CardReply>(response)?.cards;
+        let mut names = Vec::with_capacity(cards.len());
+        let mut amounts = Vec::with_capacity(cards.len());
+        let mut rarities = Vec::with_capacity(cards.len());
+        let mut sets = Vec::with_capacity(cards.len());
+        let pb = ProgressBar::new(cards.len() as u64);
+        for NameAmount { id, owned } in cards {
+            pb.inc(1);
+            let net_card_data = match translator.translate(id) {
+                Ok(net_card_data) => net_card_data,
+                Err(_) => {
+                    // pb.println(format!("Failed to translate card: {e}"));
+                    continue;
+                }
+            };
+            names.push(net_card_data.name);
+            amounts.push(owned);
+            rarities.push(net_card_data.rarity);
+            sets.push(net_card_data.set);
+        }
+        pb.finish();
+        Ok(Collection {
+            names,
+            amounts,
+            rarities,
+            sets,
         })
     }
 
-    fn adress(&self) -> String {
-        format!("http://localhost:{}", self.port)
-    }
-
-    pub fn cards(&self) -> Result<Value> {
-        let url = dbg!(format!("{}/cards", self.adress()));
-        let response = &dbg!(get(url)?.text()?);
-        let value = dbg!(serde_json::from_str(response)?);
-        Ok(value)
+    pub fn fetch_card(name: impl AsRef<str>) -> Result<NetCardData> {
+        let url = format!(
+            "https://api.scryfall.com/cards/named?exact={}",
+            name.as_ref()
+        );
+        let response = reqwest::blocking::get(url)
+            .with_context(|| anyhow!("Unable to find {} on scryfall", name.as_ref()))?
+            .json()
+            .context("Unable to parse json from Scryfall")?;
+        let net_card_data = serde_json::from_value(response)?;
+        Ok(net_card_data)
     }
 
     #[cfg(test)]
-    pub fn status(&self) -> Result<Value> {
-        let url = format!("{}/status", self.adress());
-        let response = &dbg!(get(url)?.text()?);
-        let value = dbg!(serde_json::from_str(response)?);
+    pub fn status() -> Result<Value> {
+        let url = format!("{}/status", Self::address());
+        let response = reqwest::blocking::get(url)?.text()?;
+        let value = serde_json::from_str(response.as_str())?;
         Ok(value)
-    }
-}
-
-impl Drop for CardGetter {
-    fn drop(&mut self) {
-        let url = format!("{}/shutdown", self.adress());
-        let _ = Client::new()
-            .post(url)
-            .send()
-            .map_err(|err| eprintln!("ERROR: Failed to call shutdown on daemon, {err}"));
-        let _ = self
-            .daemon
-            .kill()
-            .map_err(|err| eprintln!("ERROR: Failed to kill daemon, {err}"));
     }
 }
 
@@ -66,18 +95,13 @@ mod test {
     use super::*;
 
     #[test]
-    fn get_status() -> Result<()> {
-        let card_getter = CardGetter::new(8989)?;
-        let status = card_getter.status()?;
-        assert_eq!(
-            serde_json::json!({
-                "daemonVersion": "1.0.6.1",
-                "isRunning": "false",
-                "processId": -1,
-                "updating": "false",
-            }),
-            status
-        );
-        Ok(())
+    fn get_status() {
+        let status = CardGetter::status().unwrap();
+        let status = status.as_object().unwrap();
+        assert!(status.len() == 4);
+        assert!(status.contains_key("isRunning"));
+        assert!(status.contains_key("daemonVersion"));
+        assert!(status.contains_key("updating"));
+        assert!(status.contains_key("processId"));
     }
 }

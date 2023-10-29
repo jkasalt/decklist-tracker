@@ -1,9 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
-use detr::{CardData, Deck, Inventory, Rarity, Roster, Wildcards};
+use detr::{
+    card_getter::CardGetter, mtga_id_translator::MtgaIdTranslator, CardData, Deck, Inventory,
+    Rarity, Roster, Wildcards,
+};
 use directories::BaseDirs;
 use either::*;
 use itertools::Itertools;
+use mktemp::Temp;
 use regex::Regex;
 use std::{
     collections::HashMap,
@@ -33,6 +37,7 @@ struct Cli {
     collection_path: Option<PathBuf>,
 
     #[arg(
+        short,
         long,
         global = true,
         help = "Will ignore deck sideboards for calculations"
@@ -72,6 +77,7 @@ enum Commands {
     Edit {
         deck_name: String,
     },
+    #[command(alias = "s")]
     Suggest {
         #[arg(
             long,
@@ -94,6 +100,9 @@ enum Commands {
     Booster,
     Which {
         query: String,
+    },
+    WhichSet {
+        set: String,
     },
     PrintCoeffs,
 }
@@ -141,7 +150,7 @@ fn missing<P: AsRef<Path>>(
 
 fn suggest<P: AsRef<Path>>(
     roster: &Roster<P>,
-    inventory: &Inventory,
+    inventory: &mut Inventory,
     ignore_sideboard: bool,
     equally: bool,
 ) -> Result<()> {
@@ -155,14 +164,14 @@ fn suggest<P: AsRef<Path>>(
         .collect();
 
     for deck in decks {
-        for (deck_amount, card_name) in deck.cards(ignore_sideboard) {
+        for (card_name, deck_amount) in deck.cards(ignore_sideboard) {
             let rarity = inventory
                 .cheapest_rarity(card_name)
                 .context("When computing rarity")?;
             let deck_cost = if !equally {
                 inventory
                     .deck_cost(deck, ignore_sideboard)
-                    .context("When computing deck cost")?
+                    .with_context(|| format!("Failed to compute deck cost for `{}`", deck.name))?
             } else {
                 100.0
             };
@@ -237,11 +246,11 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| app_dir.join("roster.json"));
     let collection_path = cli
         .collection_path
-        .unwrap_or_else(|| app_dir.join("collection.csv"));
+        .unwrap_or_else(|| app_dir.join("collection.json"));
     let wildcards_path = app_dir.join("wildcards.json");
     let mut roster = Roster::open(&roster_path)
         .with_context(|| format!("Failed to open deck roster with path {roster_path:?}"))?;
-    let inventory = Inventory::open(&collection_path, &wildcards_path).with_context(|| {
+    let mut inventory = Inventory::open(&collection_path, &wildcards_path).with_context(|| {
         format!("Failed to open inventory with paths {collection_path:?}, and {wildcards_path:?}")
     })?;
     let ignore_sideboard = cli.ignore_sb;
@@ -251,25 +260,28 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Booster) => {
             // For each set, sums up the card values
-            let mut set_value = HashMap::new();
-            for deck in roster.decks() {
-                for (&amount, card_name) in deck.cards(ignore_sideboard) {
-                    let card_cheapest_version = inventory.cheapest_version(card_name)?;
-                    let set_name = card_cheapest_version.set_name;
-                    let card_cost = inventory.card_cost(card_name)?;
-                    let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
-                    *set_value.entry(set_name).or_insert(0.0) += card_cost * missing_amount as f32;
-                }
+            let mut set_values = HashMap::new();
+            for (card_name, amount) in roster.cards(ignore_sideboard) {
+                let card_cheapest_version = inventory.cheapest_version(card_name)?;
+                let set_name = card_cheapest_version.set_name;
+                let card_cost = inventory.card_cost(card_name)?;
+                let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
+                *set_values.entry(set_name).or_insert(0.0) += card_cost * missing_amount as f32;
             }
-            println!("{set_value:#?}");
+            let mut set_values = set_values.iter().collect_vec();
+            set_values.sort_unstable_by(|(_, v1), (_, v2)| v2.partial_cmp(v1).unwrap());
+            set_values
+                .iter()
+                .take(10)
+                .for_each(|(set, value)| println!("{value} {set}"));
         }
         Some(Commands::Edit { deck_name }) => {
             let deck = roster.find(&deck_name)?;
-            let tmp_file_name = "deck.tmp";
-            fs::write(tmp_file_name, format!("{deck}").as_bytes())?;
+            let tmp_file = Temp::new_file()?;
+            fs::write(&tmp_file, format!("{deck}").as_bytes())?;
             // TODO: make this work on machines that don't have nvim installed ?
             let mut child = Command::new("nvim")
-                .arg(tmp_file_name)
+                .arg(tmp_file.to_path_buf())
                 .stdin(Stdio::piped())
                 .spawn()?;
 
@@ -277,20 +289,22 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Vim exited with an error");
             }
 
-            let modified_deck = fs::read_to_string(tmp_file_name)
+            let modified_deck = fs::read_to_string(tmp_file)
                 .context("When attempting to read temp file")?
                 .parse::<Deck>()?
                 .name(&deck_name);
-            fs::remove_file(tmp_file_name)?;
             roster.replace(&deck_name, modified_deck)?;
         }
         Some(Commands::Export { deck_name }) => export(&deck_name, &roster)?,
         Some(Commands::List) => {
-            let mut decks = roster
+            let costs = roster
                 .decks()
-                .cloned()
-                .map(|deck| (inventory.deck_cost(&deck, ignore_sideboard).unwrap(), deck))
-                .collect_vec();
+                .map(|deck| {
+                    (inventory.deck_cost(deck, ignore_sideboard))
+                        .with_context(|| format!("Failed to compute deck cost for `{}`", deck.name))
+                })
+                .collect::<Result<Vec<_>>>()?; // Just collect here, to make error-handling less of a headache
+            let mut decks = costs.iter().zip(roster.decks()).collect_vec();
             decks.sort_unstable_by(|(c1, _), (c2, _)| c1.partial_cmp(c2).unwrap());
             for (coeff, deck) in decks {
                 println!("{coeff:.2}\t {}", deck.name);
@@ -339,19 +353,44 @@ fn main() -> anyhow::Result<()> {
             roster.find(&deck_name).map(|deck| println!("{deck}"))?
         }
         Some(Commands::Suggest { equally }) => {
-            suggest(&roster, &inventory, ignore_sideboard, equally)?;
+            suggest(&roster, &mut inventory, ignore_sideboard, equally)?;
         }
         Some(Commands::UpdateCollection { path }) => {
-            std::fs::copy(path, collection_path)?;
+            // std::fs::copy(path, collection_path)?;
+            let mut translator = MtgaIdTranslator::load_from_file(path)?;
+            let recently_fetched = CardGetter::owned_cards(&mut translator)?;
+            inventory.update_collection(recently_fetched)
         }
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
             for deck in roster.decks() {
-                for (amount, card_name) in deck.cards(ignore_sideboard) {
+                for (card_name, amount) in deck.cards(ignore_sideboard) {
                     if re.is_match(&card_name.to_lowercase()) {
                         println!("{}\t{amount} {card_name}", deck.name);
                     }
                 }
+            }
+        }
+        Some(Commands::WhichSet { set: set_name }) => {
+            let mut found_cards = HashMap::new();
+            for (card_name, amount) in roster.cards(ignore_sideboard) {
+                let card = inventory.cheapest_version(card_name)?;
+                if card.set_name == set_name {
+                    let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
+                    *found_cards.entry(card_name).or_insert(0) += missing_amount;
+                }
+            }
+            let mut found_cards = found_cards
+                .into_iter()
+                .filter(|(_, missing_amount)| *missing_amount > 0)
+                .collect_vec();
+            found_cards.sort_unstable_by_key(|(_, amount)| std::cmp::Reverse(*amount));
+            println!(
+                "Found a total of {} missing cards in {set_name}\n",
+                found_cards.len()
+            );
+            for (card, amount) in found_cards {
+                println!("{amount} {card}");
             }
         }
         None => {}
