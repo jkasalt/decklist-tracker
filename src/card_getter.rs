@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
-use reqwest::blocking::Client;
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener};
@@ -31,48 +31,39 @@ impl CardGetter {
         "http://localhost:9000"
     }
 
-    pub fn owned_cards<P: AsRef<Path>>(translator: &mut MtgaIdTranslator<P>) -> Result<Collection> {
-        let url = format!("{}/cards", Self::address());
+    pub fn owned_cards(translator: &mut MtgaIdTranslator) -> Result<Collection> {
+        let to_parse = format!("{}/cards", Self::address());
+        let url =
+            Url::parse(&to_parse).with_context(|| anyhow!("Failed to parse url {to_parse}"))?;
         let response = reqwest::blocking::get(url)
             .context(
                 "Unable to get cards from daemon. Are you sure the daemon is running on port 9000?",
             )?
             .json()
-            .context("Unable to parse json from card daemon. Are you sure the game is running?")?;
+            .context("Unable to parse json from card daemon. Make sure the game is idling in the main menu.")?;
         let cards: Vec<NameAmount> = serde_json::from_value::<CardReply>(response)?.cards;
-        let mut names = Vec::with_capacity(cards.len());
-        let mut amounts = Vec::with_capacity(cards.len());
-        let mut rarities = Vec::with_capacity(cards.len());
-        let mut sets = Vec::with_capacity(cards.len());
         let pb = ProgressBar::new(cards.len() as u64);
-        for NameAmount { id, owned } in cards {
-            pb.inc(1);
-            let net_card_data = match translator.translate(id) {
-                Ok(net_card_data) => net_card_data,
-                Err(_) => {
-                    // pb.println(format!("Failed to translate card: {e}"));
-                    continue;
-                }
-            };
-            names.push(net_card_data.name);
-            amounts.push(owned);
-            rarities.push(net_card_data.rarity);
-            sets.push(net_card_data.set);
-        }
+        let collection = cards
+            .into_iter()
+            .flat_map(|NameAmount { id, owned }| {
+                pb.inc(1);
+                let card_data = translator
+                    .translate(id)?
+                    .ok_or(anyhow!("Card with id {id} does not exist on scryfall"))?;
+                Ok::<_, anyhow::Error>((card_data.name, owned, card_data.rarity, card_data.set))
+            })
+            .collect::<Collection>();
         pb.finish();
-        Ok(Collection {
-            names,
-            amounts,
-            rarities,
-            sets,
-        })
+        Ok(collection)
     }
 
     pub fn fetch_card(name: impl AsRef<str>) -> Result<NetCardData> {
-        let url = format!(
+        let to_parse = format!(
             "https://api.scryfall.com/cards/named?exact={}",
             name.as_ref()
         );
+        let url =
+            Url::parse(&to_parse).with_context(|| anyhow!("Failed to parse url {to_parse}"))?;
         let response = reqwest::blocking::get(url)
             .with_context(|| anyhow!("Unable to find {} on scryfall", name.as_ref()))?
             .json()

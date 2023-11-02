@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
 use detr::{
-    card_getter::CardGetter, mtga_id_translator::MtgaIdTranslator, CardData, Deck, Inventory,
-    Rarity, Roster, Wildcards,
+    card_getter::CardGetter, mtga_id_translator::MtgaIdTranslator, Deck, Inventory, Rarity, Roster,
+    Wildcards,
 };
 use directories::BaseDirs;
 use either::*;
@@ -12,7 +12,7 @@ use regex::Regex;
 use std::{
     collections::HashMap,
     fs::{self},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
@@ -107,49 +107,50 @@ enum Commands {
     PrintCoeffs,
 }
 
-fn export<P: AsRef<Path>>(deck_name: &str, roster: &Roster<P>) -> Result<()> {
+fn export(deck_name: &str, roster: &Roster) -> Result<()> {
     let deck = roster.find(deck_name)?;
     clipboard_win::set_clipboard(clipboard_win::formats::Unicode, deck.to_string())
         .map_err(|err| anyhow!("Failed to set clipboard {err}"))?;
     Ok(())
 }
 
-fn missing<P: AsRef<Path>>(
+fn missing(
     deck_name: &str,
-    roster: &Roster<P>,
+    roster: &Roster,
     inventory: &Inventory,
     ignore_sideboard: bool,
 ) -> Result<()> {
     let deck = roster.find(deck_name)?;
     let missing_cards = inventory.missing_cards(deck, ignore_sideboard);
 
-    let mut missing_cards: Vec<_> = missing_cards.collect();
-    missing_cards.sort_by_key(|m| m.rarity);
-    let fold_missing_cards = |acc: (u8, u8, u8, u8), card: &CardData| match card.rarity {
-        Rarity::Common => (card.amount + acc.0, acc.1, acc.2, acc.3),
-        Rarity::Uncommon => (acc.0, card.amount + acc.1, acc.2, acc.3),
-        Rarity::Rare => (acc.0, acc.1, card.amount + acc.2, acc.3),
-        Rarity::Mythic => (acc.0, acc.1, acc.2, card.amount + acc.3),
-        Rarity::Land => acc,
-        Rarity::Unknown => {
-            eprintln!("Warning: unknown card encountered ({})", card.name);
-            acc
-        }
-    };
+    let mut missing_cards = missing_cards?;
+    missing_cards.sort_by_key(|m| m.2);
+    let fold_missing_cards =
+        |acc: (u8, u8, u8, u8), card: &(&String, u8, Rarity, &String)| match card.2 {
+            Rarity::Common => (card.1 + acc.0, acc.1, acc.2, acc.3),
+            Rarity::Uncommon => (acc.0, card.1 + acc.1, acc.2, acc.3),
+            Rarity::Rare => (acc.0, acc.1, card.1 + acc.2, acc.3),
+            Rarity::Mythic => (acc.0, acc.1, acc.2, card.1 + acc.3),
+            Rarity::Land => acc,
+            Rarity::Unknown => {
+                eprintln!("Warning: unknown card encountered ({})", card.0);
+                acc
+            }
+        };
     let (missing_c, missing_u, missing_r, missing_m) =
         missing_cards.iter().fold((0, 0, 0, 0), fold_missing_cards);
     println!("Missing commons: {missing_c}, missing uncommons: {missing_u}, missing rares: {missing_r}, missing mythics: {missing_m}.\n");
     missing_cards
         .iter()
-        .filter(|m| m.amount > 0)
+        .filter(|m| m.1 > 0)
         .for_each(|missing| {
-            println!("{:?}\t {} {}", missing.rarity, missing.amount, missing.name);
+            println!("{:?}\t {} {}", missing.2, missing.1, missing.0);
         });
     Ok(())
 }
 
-fn suggest<P: AsRef<Path>>(
-    roster: &Roster<P>,
+fn suggest(
+    roster: &Roster,
     inventory: &mut Inventory,
     ignore_sideboard: bool,
     equally: bool,
@@ -158,12 +159,8 @@ fn suggest<P: AsRef<Path>>(
     let mut sug_uncommon = HashMap::new();
     let mut sug_rare = HashMap::new();
     let mut sug_mythic = HashMap::new();
-    let decks: Vec<_> = roster
-        .decks()
-        .filter(|deck| inventory.missing_cards(deck, ignore_sideboard).count() > 1)
-        .collect();
 
-    for deck in decks {
+    for deck in roster.decks() {
         for (card_name, deck_amount) in deck.cards(ignore_sideboard) {
             let rarity = inventory
                 .cheapest_rarity(card_name)
@@ -207,10 +204,10 @@ fn suggest<P: AsRef<Path>>(
     Ok(())
 }
 
-fn add_from_file<P: AsRef<Path>>(
+fn add_from_file(
     deck_paths: &Vec<String>,
     names: Option<&Vec<String>>,
-    roster: &mut Roster<P>,
+    roster: &mut Roster,
 ) -> Result<()> {
     let names_iter = match names {
         Some(names) => Left(names.iter().map(|s| s.as_str())),
@@ -263,7 +260,7 @@ fn main() -> anyhow::Result<()> {
             let mut set_values = HashMap::new();
             for (card_name, amount) in roster.cards(ignore_sideboard) {
                 let card_cheapest_version = inventory.cheapest_version(card_name)?;
-                let set_name = card_cheapest_version.set_name;
+                let set_name = &card_cheapest_version.2;
                 let card_cost = inventory.card_cost(card_name)?;
                 let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
                 *set_values.entry(set_name).or_insert(0.0) += card_cost * missing_amount as f32;
@@ -357,9 +354,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::UpdateCollection { path }) => {
             // std::fs::copy(path, collection_path)?;
-            let mut translator = MtgaIdTranslator::load_from_file(path)?;
-            let recently_fetched = CardGetter::owned_cards(&mut translator)?;
-            inventory.update_collection(recently_fetched)
+            let mut translator = MtgaIdTranslator::load_from_file(path)
+                .context("Failed to load translator.json file")?;
+            let recently_fetched =
+                CardGetter::owned_cards(&mut translator).context("Failed to get owned cards")?;
+            inventory.update_collection(recently_fetched, &roster)
         }
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;
@@ -375,7 +374,7 @@ fn main() -> anyhow::Result<()> {
             let mut found_cards = HashMap::new();
             for (card_name, amount) in roster.cards(ignore_sideboard) {
                 let card = inventory.cheapest_version(card_name)?;
-                if card.set_name == set_name {
+                if card.2 == set_name {
                     let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
                     *found_cards.entry(card_name).or_insert(0) += missing_amount;
                 }

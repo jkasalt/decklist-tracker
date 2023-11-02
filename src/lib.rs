@@ -1,20 +1,18 @@
+use crate::collection::Collection;
 use anyhow::{anyhow, bail, Context, Result};
-use card_getter::CardGetter;
 use itertools::Itertools;
-use mtga_id_translator::NetCardData;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::{self, File},
     io::Write,
     mem,
-    ops::Index,
     path::{Path, PathBuf},
-    slice::SplitMut,
     str::FromStr,
 };
 
 pub mod card_getter;
+pub mod collection;
 pub mod mtga_id_translator;
 
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -28,12 +26,34 @@ pub enum Rarity {
     Unknown,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
 pub struct CardData {
     pub amount: u8,
     pub name: String,
     pub rarity: Rarity,
-    pub set_name: String,
+    pub set: String,
+}
+
+impl From<(u8, String, Rarity, String)> for CardData {
+    fn from(value: (u8, String, Rarity, String)) -> Self {
+        CardData {
+            amount: value.0,
+            name: value.1,
+            rarity: value.2,
+            set: value.3,
+        }
+    }
+}
+
+impl From<(String, (u8, Rarity, String))> for CardData {
+    fn from(value: (String, (u8, Rarity, String))) -> Self {
+        CardData {
+            amount: value.1 .0,
+            name: value.0,
+            rarity: value.1 .1,
+            set: value.1 .2,
+        }
+    }
 }
 
 // impl CardData {
@@ -139,216 +159,7 @@ impl Wildcards {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Collection {
-    names: Vec<String>,
-    amounts: Vec<u8>,
-    rarities: Vec<Rarity>,
-    sets: Vec<String>,
-}
-
-impl Collection {
-    pub fn from_csv(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let content = fs::read_to_string(path).context("Failed to find collection csv file")?;
-        let num_lines = content.lines().count();
-        let mut names = Vec::with_capacity(num_lines);
-        let mut amounts = Vec::with_capacity(num_lines);
-        let mut rarities = Vec::with_capacity(num_lines);
-        let mut sets = Vec::with_capacity(num_lines);
-
-        for (i, line) in content.lines().enumerate().skip(1) {
-            let err_message = || {
-                format!("Failed to read line {line} (number {i}) in file {path:?}, as it is not in the expected format")
-            };
-            let mut elements = line.split(';');
-            let amount = elements.next().with_context(err_message)?.parse()?;
-            let name = elements.next().with_context(err_message)?.to_owned();
-            let set = elements.next().with_context(err_message)?.to_owned();
-            let rarity = elements
-                .nth(1)
-                .map(|s| match s {
-                    "common" => Rarity::Common,
-                    "uncommon" => Rarity::Uncommon,
-                    "rare" => Rarity::Rare,
-                    "mythic" => Rarity::Mythic,
-                    "land" => Rarity::Land,
-                    _ => Rarity::Unknown,
-                })
-                .with_context(err_message)?;
-            names.push(name);
-            amounts.push(amount);
-            sets.push(set);
-            rarities.push(rarity);
-        }
-
-        Ok(Collection {
-            names,
-            amounts,
-            rarities,
-            sets,
-        })
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &CardData> {
-        self.amounts
-            .iter()
-            .zip(self.names.iter())
-            .zip(self.rarities.iter())
-            .zip(self.sets.iter())
-            .map(|(((amount, name), rarity), set_name)| &CardData {
-                amount,
-                name,
-                rarity,
-                set_name,
-            })
-    }
-
-    pub fn push(&mut self, card_data: CardData) {
-        self.names.push(card_data.name);
-        self.amounts.push(card_data.amount);
-        self.rarities.push(card_data.rarity);
-        self.sets.push(card_data.set_name);
-    }
-
-    pub fn get<'a>(&'a mut self, name: &'a str) -> Result<Vec<&CardData>> {
-        // if let "Plains" | "Island" | "Swamp" | "Mountain" | "Forest" = name {
-        //     return Ok(vec![RefCardData {
-        //         amount: &u8::MAX,
-        //         name,
-        //         rarity: &Rarity::Land,
-        //         set_name: "land",
-        //     }]);
-        // }
-        let found = self
-            .iter()
-            .enumerate()
-            .filter_map(|(i, card_data)| (card_data.simplified_name() == name).then(||i))
-            .collect_vec();
-        if found.is_empty() {
-            eprintln!("Fetching unknown card `{name}`");
-            let net_card_data = CardGetter::fetch_card(name)?;
-            let card_data = CardData {
-                name: net_card_data.name,
-                amount: 0,
-                rarity: net_card_data.rarity,
-                set_name: net_card_data.set,
-            };
-            self.push(card_data);
-            Ok(vec![self.last()])
-        } else {
-            Ok(found)
-        }
-    }
-
-    pub fn missing<'a>(
-        &'a self,
-        deck: &'a Deck,
-        ignore_sideboard: bool,
-    ) -> impl Iterator<Item = CardData> + 'a {
-        deck.cards(ignore_sideboard)
-            .filter(|(deck_card_name, _)| {
-                // Ignore basic lands
-                !matches!(
-                    deck_card_name.as_str(),
-                    "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
-                )
-            })
-            // For each card in the deck
-            .map(|(name, deck_amount)| {
-                let card_group: Vec<_> = self
-                    .iter()
-                    .filter(|refcard_data| refcard_data.name == name)
-                    .collect();
-                let owned_amount = card_group.iter().map(|card_data| card_data.amount).sum();
-                let (set_name, lowest_rarity) = card_group
-                    .iter()
-                    .map(|card_data| (card_data.set_name, card_data.rarity))
-                    .min_by_key(|(_, rarity)| *rarity)
-                    .unwrap_or(("???", &Rarity::Unknown));
-                let missing_amout = deck_amount.saturating_sub(owned_amount);
-                CardData {
-                    amount: missing_amout,
-                    name: name.to_owned(),
-                    rarity: *lowest_rarity,
-                    set_name: set_name.to_string(),
-                }
-            })
-    }
-
-    fn last(&self) -> &CardData {
-        &CardData {
-            amount: self.amounts.last().unwrap(),
-            name: self.names.last().unwrap(),
-            rarity: self.rarities.last().unwrap(),
-            set_name: self.sets.last().unwrap(),
-        }
-    }
-
-    fn into_raw_parts(self) -> (Vec<String>, Vec<u8>, Vec<Rarity>, Vec<String>) {
-        (self.names, self.amounts, self.rarities, self.sets)
-    }
-
-    fn into_hash_map(self) -> HashMap<String, Vec<(u8, Rarity, String)>> {
-        self.into()
-    }
-
-    fn from_hash_map(map: HashMap<String, Vec<(u8, Rarity, String)>>) -> Self {
-        map.into()
-    }
-}
-
-impl From<HashMap<String, Vec<(u8, Rarity, String)>>> for Collection {
-    fn from(map: HashMap<String, Vec<(u8, Rarity, String)>>) -> Self {
-        let size = map.values().map(|v| v.len()).sum();
-        let mut names = Vec::with_capacity(size);
-        let mut amounts = Vec::with_capacity(size);
-        let mut rarities = Vec::with_capacity(size);
-        let mut sets = Vec::with_capacity(size);
-        for (name, versions) in map {
-            for (amount, rarity, set) in versions {
-                names.push(name.clone());
-                amounts.push(amount);
-                rarities.push(rarity);
-                sets.push(set);
-            }
-        }
-        Collection {
-            names,
-            amounts,
-            rarities,
-            sets,
-        }
-    }
-}
-
-impl From<Collection> for HashMap<String, Vec<(u8, Rarity, String)>> {
-    fn from(collection: Collection) -> HashMap<String, Vec<(u8, Rarity, String)>> {
-        let (names, amounts, rarities, sets) = collection.into_raw_parts();
-        let mut map = HashMap::with_capacity(names.len());
-        names
-            .into_iter()
-            .zip(amounts)
-            .zip(rarities)
-            .zip(sets)
-            .for_each(|(((name, amount), rarity), set)| {
-                map.entry(name)
-                    .or_insert(Vec::new())
-                    .push((amount, rarity, set));
-            });
-        map
-    }
-}
-
-impl Index<usize> for Collection {
-    type Output = CardData;
-    fn index(&self, index: usize) -> &Self::Output {
-        todo!()
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct Deck {
     pub name: String,
     companion: Option<String>,
@@ -484,12 +295,12 @@ impl Deck {
 }
 
 #[derive(Debug)]
-pub struct Roster<P: AsRef<Path>> {
-    path: P,
+pub struct Roster {
+    path: PathBuf,
     decks: Vec<Deck>,
 }
 
-impl<P: AsRef<Path>> Roster<P> {
+impl Roster {
     pub fn decks_mut(&mut self) -> std::slice::IterMut<Deck> {
         self.decks.iter_mut()
     }
@@ -497,7 +308,7 @@ impl<P: AsRef<Path>> Roster<P> {
         self.decks.iter()
     }
 
-    pub fn open(path: P) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if !path.as_ref().exists() {
             let mut file = File::create(&path)?;
             file.write_all(b"[]")?;
@@ -509,7 +320,10 @@ impl<P: AsRef<Path>> Roster<P> {
             serde_json::from_reader(file)
                 .map_err(|err| anyhow!("Failed to deserialize roster: {err}"))?
         };
-        Ok(Roster { path, decks })
+        Ok(Roster {
+            path: path.as_ref().to_path_buf(),
+            decks,
+        })
     }
 
     // TODO: change &Deck to Generic Cow<Deck>
@@ -561,7 +375,7 @@ impl<P: AsRef<Path>> Roster<P> {
     }
 }
 
-impl<P: AsRef<Path>> Drop for Roster<P> {
+impl Drop for Roster {
     fn drop(&mut self) {
         self.write()
             .unwrap_or_else(|err| eprintln!("ERROR: while closing roster, {err}"));
@@ -587,7 +401,7 @@ impl Inventory {
                 serde_json::to_string(&Collection::default())?,
             )?;
         }
-        let collection = serde_json::from_reader(File::open(&collection_path)?)
+        let collection: Collection = serde_json::from_reader(File::open(&collection_path)?)
             .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
         let wildcards: Wildcards = if !wildcards_path.as_ref().exists() {
             Wildcards::default()
@@ -602,7 +416,7 @@ impl Inventory {
         })
     }
 
-    pub fn card_cost(&mut self, card_name: &str) -> Result<f32> {
+    pub fn card_cost(&self, card_name: &str) -> Result<f32> {
         let cheapest_rarity = &self.cheapest_rarity(card_name)?;
         let cost = self.coeffs.select(cheapest_rarity);
         Ok(cost)
@@ -629,12 +443,9 @@ impl Inventory {
         }
     }
 
-    pub fn cheapest_rarity(&mut self, card_name: &str) -> Result<Rarity> {
+    pub fn cheapest_rarity(&self, card_name: &str) -> Result<Rarity> {
         let card_group = self.collection.get(card_name)?;
-        let group_rarities = card_group
-            .iter()
-            .map(|card_data| card_data.rarity)
-            .collect_vec();
+        let group_rarities = card_group.iter().map(|(_, rarity, _)| rarity).collect_vec();
         let ordered_rarities = self.coeffs.order();
         let cheapest_rarity = ordered_rarities
             .iter()
@@ -643,24 +454,24 @@ impl Inventory {
         Ok(*cheapest_rarity)
     }
 
-    pub fn cheapest_version(&mut self, card_name: &str) -> Result<CardData> {
+    pub fn cheapest_version<'a>(&'a self, card_name: &'a str) -> Result<&(u8, Rarity, String)> {
         let cheapest_rarity = self.cheapest_rarity(card_name)?;
         let card_group = self.collection.get(card_name)?;
         let cheapest_version = card_group
             .iter()
-            .find(|card_data| *card_data.rarity == cheapest_rarity)
+            .find(|(_, rarity, _)| *rarity == cheapest_rarity)
             .unwrap();
-        Ok(cheapest_version.to_owned())
+        Ok(cheapest_version)
     }
 
-    pub fn card_amount(&mut self, card_name: &str) -> Result<u8> {
-        let in_collection = self
+    pub fn card_amount(&self, card_name: &str) -> Result<u8> {
+        let in_collection: u8 = self
             .collection
             .get(card_name)?
             .iter()
-            .map(|card_data| card_data.amount)
+            .map(|(amount, _, _)| *amount)
             .sum();
-        Ok(std::cmp::min(in_collection, 4))
+        Ok(in_collection.clamp(0, 4))
     }
 
     pub fn deck_cost(&mut self, deck: &Deck, ignore_sideboard: bool) -> Result<f32> {
@@ -674,19 +485,14 @@ impl Inventory {
         Ok(nifty_formula)
     }
 
-    pub fn update_collection(&mut self, other: Collection) {
-        let other = other.into_hash_map();
-        let mut original = mem::take(&mut self.collection).into_hash_map();
-        for (key, value) in other {
-            original.insert(key, value);
-        }
-        mem::swap(
-            &mut Collection::from_hash_map(original),
-            &mut self.collection,
-        )
+    pub fn update_collection(&mut self, recently_fetched: Collection, roster: &Roster) {
+        self.collection.ensure_known(roster);
+        let mut original = mem::take(&mut self.collection);
+        original.merge(recently_fetched);
+        mem::swap(&mut original, &mut self.collection);
     }
 
-    pub fn get<'b>(&'b mut self, s: &'b str) -> Result<Vec<&CardData>> {
+    pub fn get<'b>(&'b mut self, s: &'b str) -> Result<&Vec<(u8, Rarity, String)>> {
         self.collection.get(s)
     }
 
@@ -694,7 +500,7 @@ impl Inventory {
         &'b self,
         deck: &'b Deck,
         ignore_sideboard: bool,
-    ) -> impl Iterator<Item = CardData> + 'b {
+    ) -> Result<Vec<(&String, u8, Rarity, &String)>> {
         self.collection.missing(deck, ignore_sideboard)
     }
 
