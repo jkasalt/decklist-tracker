@@ -32,7 +32,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "What path to use for the collection csv"
+        help = "What path to use for the collection json"
     )]
     collection_path: Option<PathBuf>,
 
@@ -62,9 +62,8 @@ enum Commands {
     Missing {
         deck_name: String,
     },
-    UpdateCollection {
-        path: String,
-    },
+    #[command(alias = "u")]
+    UpdateCollection,
     Remove {
         deck_name: String,
     },
@@ -86,6 +85,7 @@ enum Commands {
         )]
         equally: bool,
     },
+    #[command(alias = "l")]
     List,
     Rename {
         current_name: String,
@@ -245,6 +245,8 @@ fn main() -> anyhow::Result<()> {
         .collection_path
         .unwrap_or_else(|| app_dir.join("collection.json"));
     let wildcards_path = app_dir.join("wildcards.json");
+    let mut translator = MtgaIdTranslator::load_from_file(app_dir.join("translator.ron"))
+        .context("Failed to load translator.json file")?;
     let mut roster = Roster::open(&roster_path)
         .with_context(|| format!("Failed to open deck roster with path {roster_path:?}"))?;
     let mut inventory = Inventory::open(&collection_path, &wildcards_path).with_context(|| {
@@ -352,10 +354,8 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Suggest { equally }) => {
             suggest(&roster, &mut inventory, ignore_sideboard, equally)?;
         }
-        Some(Commands::UpdateCollection { path }) => {
+        Some(Commands::UpdateCollection) => {
             // std::fs::copy(path, collection_path)?;
-            let mut translator = MtgaIdTranslator::load_from_file(path)
-                .context("Failed to load translator.json file")?;
             let recently_fetched =
                 CardGetter::owned_cards(&mut translator).context("Failed to get owned cards")?;
             inventory.update_collection(recently_fetched, &roster)

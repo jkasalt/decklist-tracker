@@ -1,13 +1,14 @@
 use crate::{
-    card_getter::{self, CardGetter},
-    CardData, Deck, Rarity, Roster,
+    card_getter::CardGetter, mtga_id_translator::NetCardData, CardData, Deck, Rarity, Roster,
 };
 use anyhow::{anyhow, Context, Result};
+use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::Path};
 
-fn simplified_name(name: &impl AsRef<str>) -> &str {
+pub(crate) fn simplified_name(name: &impl AsRef<str>) -> &str {
     name.as_ref()
+        .trim_start_matches("A-")
         .split_once(" // ")
         .map_or(name.as_ref(), |split| split.0)
 }
@@ -21,7 +22,7 @@ impl Collection {
     pub fn from_csv(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file_content =
-            fs::read_to_string(path).context("Failed to find collection csv file")?;
+            fs::read_to_string(path).context("Failed to find collection jsin file")?;
 
         file_content.lines().enumerate().skip(1).map(|(i, line)| {
             let err_message = || {
@@ -60,17 +61,26 @@ impl Collection {
     pub fn insert(&mut self, card_data: impl Into<CardData>) {
         let card_data = card_data.into();
         let card_name = card_data.name.trim();
+        // TODO: do this action _after_ we load everything
+        let rarity = if matches!(
+            card_name,
+            "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
+        ) {
+            Rarity::Land
+        } else {
+            card_data.rarity
+        };
         let simplified_name = simplified_name(&card_name).to_owned();
         self.insert_inner((
             card_data.amount,
             simplified_name,
-            card_data.rarity,
+            rarity,
             card_data.set.clone(),
         ));
         self.insert_inner((
             card_data.amount,
             card_name.to_owned(),
-            card_data.rarity,
+            rarity,
             card_data.set,
         ));
     }
@@ -88,31 +98,36 @@ impl Collection {
     }
 
     pub fn ensure_known(&mut self, roster: &Roster) {
-        for (name, _) in roster.cards(false) {
+        let pb = ProgressBar::new(roster.cards(false).count() as u64);
+        for (name, _) in pb.wrap_iter(roster.cards(false)) {
+            let name = simplified_name(&name);
             if !self.content.contains_key(name) {
                 if let Err(err) = self.fetch_unknown(name) {
-                    eprintln!("Failed to fetch unknown card: {name}. {err}");
+                    pb.println(format!("Failed to fetch unknown card: {name}. {err}"));
                 }
             }
         }
+        pb.finish_and_clear();
     }
 
     pub fn get(&self, name: impl AsRef<str>) -> Result<&Vec<(u8, Rarity, String)>> {
-        self.content.get(name.as_ref()).ok_or(anyhow!(
+        let name = simplified_name(&name);
+        self.content.get(name).ok_or(anyhow!(
             "Unknown card found: {}. Make sure to run `detr update-collection` before.",
-            name.as_ref()
+            name,
         ))
     }
 
     fn fetch_unknown(&mut self, name: impl AsRef<str>) -> Result<()> {
-        eprintln!("Fetching unknown card: {}", name.as_ref());
         let card_data = CardGetter::fetch_card(&name)?;
-        self.insert(CardData {
-            amount: 0,
-            name: card_data.name,
-            rarity: card_data.rarity,
-            set: card_data.set,
-        });
+        for NetCardData { name, rarity, set } in card_data {
+            self.insert(CardData {
+                amount: 0,
+                name,
+                rarity,
+                set,
+            });
+        }
         Ok(())
     }
 

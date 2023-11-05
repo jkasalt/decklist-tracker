@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -53,7 +52,7 @@ impl MtgaIdTranslator {
         }
         self.handle_wait();
         let response =
-            reqwest::blocking::get(format!("https://api.scryfall.com/cards/arena/{}", id))?;
+            reqwest::blocking::get(format!("https://api.scryfall.com/cards/arena/{id}"))?;
         if response.status() == StatusCode::NOT_FOUND {
             self.cache.insert(id, None);
         }
@@ -63,8 +62,8 @@ impl MtgaIdTranslator {
                 response.status()
             );
         }
-        let body: Value = response.json()?;
-        let card_data: NetCardData = serde_json::from_value(body)
+        let card_data: NetCardData = response
+            .json()
             .with_context(|| anyhow!("Failed to parse card with arena id {id}"))?;
         self.cache.insert(id, Some(card_data.clone()));
         Ok(Some(card_data))

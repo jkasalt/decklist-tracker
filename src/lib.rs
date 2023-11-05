@@ -23,6 +23,7 @@ pub enum Rarity {
     Rare,
     Mythic,
     Land,
+    #[serde(other)]
     Unknown,
 }
 
