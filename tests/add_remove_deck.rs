@@ -59,14 +59,14 @@ fn remove_deck_should_produce_correct_file_when_deck_is_present() {
     let mut roster = Roster::open(&temp_file)
         .unwrap_or_else(|err| panic!("ERROR: failed to open roster because {err}"));
     roster.add_deck(
-        &Deck::from_file("boros_turns.txt")
+        Deck::from_file("boros_turns.txt")
             .unwrap()
             .name("boros turns"),
     );
     let deck2 = Deck::from_file("deification_prison.txt")
         .unwrap()
         .name("Deification prison");
-    roster.add_deck(&deck2);
+    roster.add_deck(deck2.clone());
     roster.write().unwrap();
 
     // do the thing

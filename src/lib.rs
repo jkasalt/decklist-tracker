@@ -1,3 +1,11 @@
+// #![warn(
+//     missing_docs,
+//     missing_debug_implementations,
+//     missing_copy_implementations,
+//     rust_2018_idioms
+// )]
+#![allow(clippy::pedantic)]
+
 use crate::collection::Collection;
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
@@ -13,6 +21,7 @@ use std::{
 
 pub mod card_getter;
 pub mod collection;
+pub mod craft_suggester;
 pub mod mtga_id_translator;
 
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,41 +65,6 @@ impl From<(String, (u8, Rarity, String))> for CardData {
         }
     }
 }
-
-// impl CardData {
-//     pub fn as_ref(&self) -> RefCardData {
-//         RefCardData {
-//             amount: &self.amount,
-//             name: &self.name,
-//             rarity: &self.rarity,
-//             set_name: &self.set_name,
-//         }
-//     }
-// }
-
-// #[derive(Debug, Clone)]
-// pub struct RefCardData<'a> {
-//     pub amount: &'a u8,
-//     pub name: &'a str,
-//     pub rarity: &'a Rarity,
-//     pub set_name: &'a str,
-// }
-
-// impl<'a> RefCardData<'a> {
-//     pub fn to_owned(&self) -> CardData {
-//         CardData {
-//             amount: *self.amount,
-//             name: self.name.to_owned(),
-//             rarity: *self.rarity,
-//             set_name: self.set_name.to_owned(),
-//         }
-//     }
-//     pub fn simplified_name(&self) -> &str {
-//         self.name
-//             .split_once(" // ")
-//             .map_or(self.name, |split| split.0)
-//     }
-// }
 
 #[derive(Debug)]
 pub struct WildcardCoefficients {
@@ -151,16 +125,17 @@ impl Wildcards {
 
     pub fn coefficients(&self) -> WildcardCoefficients {
         let total = self.common + self.uncommon + self.rare + self.mythic;
+        let formula = |w| total as f32 / (1.0 + w as f32);
         WildcardCoefficients {
-            common: total as f32 / (1 + self.common) as f32,
-            uncommon: total as f32 / (1 + self.uncommon) as f32,
-            rare: total as f32 / (1 + self.rare) as f32,
-            mythic: total as f32 / (1 + self.mythic) as f32,
+            common: formula(self.common),
+            uncommon: formula(self.uncommon),
+            rare: formula(self.rare),
+            mythic: formula(self.mythic),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Hash, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Deck {
     pub name: String,
     companion: Option<String>,
@@ -225,12 +200,9 @@ impl FromStr for Deck {
             let mut words = l.split(' ');
             let num = words
                 .next()
-                .with_context(error_message)?
-                .parse()
+                .and_then(|w| w.parse().ok())
                 .with_context(error_message)?;
-            let name: String =
-                Itertools::intersperse(words.take_while(|w| !w.starts_with('(')), " ").collect();
-            let name = name.to_string();
+            let name = words.take_while(|w| !w.starts_with('(')).join(" ");
             if name.is_empty() {
                 bail!(error_message());
             }
@@ -309,18 +281,24 @@ impl Roster {
         self.decks.iter()
     }
 
+    pub fn len(&self) -> usize {
+        self.decks.len()
+    }
+
+    pub fn get(&self, n: usize) -> Option<&Deck> {
+        self.decks.get(n)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        if !path.as_ref().exists() {
+        let file = if !path.as_ref().exists() {
             let mut file = File::create(&path)?;
             file.write_all(b"[]")?;
-        }
-        let decks = if !path.as_ref().exists() {
-            Vec::new()
+            file
         } else {
-            let file = File::open(&path)?;
-            serde_json::from_reader(file)
-                .map_err(|err| anyhow!("Failed to deserialize roster: {err}"))?
+            File::open(&path)?
         };
+        let decks = serde_json::from_reader(file)
+            .map_err(|err| anyhow!("Failed to deserialize roster: {err}"))?;
         Ok(Roster {
             path: path.as_ref().to_path_buf(),
             decks,
@@ -328,8 +306,8 @@ impl Roster {
     }
 
     // TODO: change &Deck to Generic Cow<Deck>
-    pub fn add_deck(&mut self, deck: &Deck) {
-        self.decks.push(deck.clone());
+    pub fn add_deck(&mut self, deck: Deck) {
+        self.decks.push(deck);
     }
 
     pub fn remove_deck(&mut self, name: &str) -> Result<()> {
@@ -347,7 +325,7 @@ impl Roster {
         Ok(())
     }
 
-    pub fn deck_list(&self) -> impl Iterator<Item = &str> {
+    pub fn deck_names(&self) -> impl Iterator<Item = &str> {
         self.decks().map(|deck| deck.name.as_str())
     }
 
@@ -424,11 +402,7 @@ impl Inventory {
     }
 
     /// This function computes the importance of a card, with regard to how many
-    /// copies a deck plays. A card that is played as a four-of will always be
-    /// more important than a card that is played as a single. This is a
-    /// helpful heuristic most of the time. However, care must be taken when
-    /// considering some decks that play important single cards, such as
-    /// Approach of the second sun, or Atraxa reanimator decks.
+    /// copies a deck plays.
     pub fn card_cost_considering_deck(
         &mut self,
         card_name: &str,
@@ -440,7 +414,7 @@ impl Inventory {
             Ok(0.0)
         } else {
             let tiebreaker_bonus = 4.0 / missing as f32;
-            Ok(self.card_cost(card_name)? * in_deck_amount as f32 + tiebreaker_bonus)
+            Ok(self.card_cost(card_name)? * missing as f32 + tiebreaker_bonus)
         }
     }
 
@@ -482,8 +456,8 @@ impl Inventory {
             result += missing as f32 * self.card_cost(card_name)?;
         }
         let closeness_bound = self.rare_coeff() * 4.0 + self.mythic_coeff();
-        let nifty_formula = f32::max(result - closeness_bound, 1.00);
-        Ok(nifty_formula)
+        let cool_formula = f32::max(result - closeness_bound, 1.00);
+        Ok(cool_formula)
     }
 
     pub fn update_collection(&mut self, recently_fetched: Collection, roster: &Roster) {

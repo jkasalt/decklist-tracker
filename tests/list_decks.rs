@@ -15,7 +15,7 @@ fn list_decks_works() {
             .name("Deification prison"),
     );
     assert_eq!(
-        roster.deck_list().collect::<Vec<_>>(),
+        roster.deck_names().collect::<Vec<_>>(),
         vec!["boros turns", "Deification prison"]
     );
 }

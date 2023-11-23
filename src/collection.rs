@@ -4,7 +4,11 @@ use crate::{
 use anyhow::{anyhow, Context, Result};
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    path::Path,
+};
 
 pub(crate) fn simplified_name(name: &impl AsRef<str>) -> &str {
     name.as_ref()
@@ -45,6 +49,12 @@ impl Collection {
                 .with_context(err_message)?;
             Ok((name, amount, rarity, set))
         }).collect::<Result<Collection>>()
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let file = File::open(path.as_ref())?;
+        let collection = serde_json::from_reader(file);
+        Ok(collection?)
     }
 
     fn insert_inner(&mut self, card_data: impl Into<CardData>) {
@@ -149,6 +159,21 @@ impl Collection {
             missing.push((name, missing_amout, *lowest_rarity, set_name));
         }
         Ok(missing)
+    }
+
+    pub fn count_missing_of_rarity(
+        &self,
+        deck: &Deck,
+        ignore_sideboard: bool,
+        rarity: Rarity,
+    ) -> Result<usize> {
+        Ok(self
+            .missing(deck, ignore_sideboard)?
+            .into_iter()
+            .filter_map(|(_, amount, this_rarity, _)| {
+                (this_rarity == rarity).then_some(amount as usize)
+            })
+            .sum())
     }
 }
 

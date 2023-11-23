@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
 use detr::{
-    card_getter::CardGetter, mtga_id_translator::MtgaIdTranslator, Deck, Inventory, Rarity, Roster,
-    Wildcards,
+    card_getter::CardGetter, collection::Collection, craft_suggester::CraftSuggester,
+    mtga_id_translator::MtgaIdTranslator, Deck, Inventory, Rarity, Roster, Wildcards,
 };
 use directories::BaseDirs;
 use either::*;
@@ -104,6 +104,7 @@ enum Commands {
     WhichSet {
         set: String,
     },
+    Recommend,
     PrintCoeffs,
 }
 
@@ -226,7 +227,7 @@ fn add_from_file(
         })
         .collect::<anyhow::Result<Vec<Deck>>>()?;
     for deck in decks {
-        roster.add_deck(&deck);
+        roster.add_deck(deck);
     }
     Ok(())
 }
@@ -319,9 +320,13 @@ fn main() -> anyhow::Result<()> {
                     .parse::<Deck>()
                     .context("Failed to parse deck from clipboard")?
                     .name(&name);
-            roster.add_deck(&deck);
+            roster.add_deck(deck);
         }
         Some(Commands::PrintCoeffs) => println!("{:?}", inventory.wildcard_coeffs()),
+        Some(Commands::Recommend) => {
+            let collection = Collection::open(&collection_path)?;
+            CraftSuggester::new(99, &roster, &collection).recommend();
+        }
         Some(Commands::Remove { deck_name }) => {
             roster
                 .remove_deck(&deck_name)
