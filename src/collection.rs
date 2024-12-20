@@ -26,7 +26,7 @@ impl Collection {
     pub fn from_csv(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let file_content =
-            fs::read_to_string(path).context("Failed to find collection jsin file")?;
+            fs::read_to_string(path).context("Failed to find collection json file")?;
 
         file_content.lines().enumerate().skip(1).map(|(i, line)| {
             let err_message = || {
@@ -48,7 +48,8 @@ impl Collection {
                 })
                 .with_context(err_message)?;
             Ok((name, amount, rarity, set))
-        }).collect::<Result<Collection>>()
+        })
+        .collect::<Result<Self>>()
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -99,8 +100,8 @@ impl Collection {
         self.content.keys()
     }
 
-    pub fn merge(&mut self, other: Collection) {
-        for (other_name, other_group) in other.content.into_iter() {
+    pub fn merge(&mut self, other: Self) {
+        for (other_name, other_group) in other.content {
             for other_row in other_group {
                 self.insert((other_name.clone(), other_row));
             }
@@ -123,8 +124,7 @@ impl Collection {
     pub fn get(&self, name: impl AsRef<str>) -> Result<&Vec<(u8, Rarity, String)>> {
         let name = simplified_name(&name);
         self.content.get(name).ok_or(anyhow!(
-            "Unknown card found: {}. Make sure to run `detr update-collection` before.",
-            name,
+            "Unknown card found: {name}. Make sure to run `detr update-collection` before.",
         ))
     }
 
@@ -141,6 +141,7 @@ impl Collection {
         Ok(())
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn missing<'a, 'b: 'a>(
         &'a self,
         deck: &'b Deck,
@@ -155,8 +156,10 @@ impl Collection {
                 .map(|(_, rarity, set_name)| (set_name, rarity))
                 .min_by_key(|(_, rarity)| *rarity)
                 .unwrap(); // We can unwrap here because self.get returns early if the card_group is empty
-            let missing_amout = deck_amount.saturating_sub(owned_amount);
-            missing.push((name, missing_amout, *lowest_rarity, set_name));
+            let missing_amount = deck_amount.saturating_sub(owned_amount);
+            if missing_amount > 0 {
+                missing.push((name, missing_amount, *lowest_rarity, set_name));
+            }
         }
         Ok(missing)
     }
@@ -167,13 +170,14 @@ impl Collection {
         ignore_sideboard: bool,
         rarity: Rarity,
     ) -> Result<usize> {
-        Ok(self
+        let count = self
             .missing(deck, ignore_sideboard)?
             .into_iter()
             .filter_map(|(_, amount, this_rarity, _)| {
                 (this_rarity == rarity).then_some(amount as usize)
             })
-            .sum())
+            .sum();
+        Ok(count)
     }
 }
 
@@ -186,6 +190,6 @@ impl FromIterator<(String, u8, Rarity, String)> for Collection {
                 .or_insert_with(Vec::new)
                 .push((amount, rarity, set));
         }
-        Collection { content }
+        Self { content }
     }
 }

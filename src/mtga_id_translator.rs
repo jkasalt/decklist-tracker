@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use crate::Rarity;
 
 const SCRYFALL_WAIT_TIME: Duration = Duration::from_millis(75);
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct NetCardData {
     pub name: String,
     pub rarity: Rarity,
@@ -19,7 +20,7 @@ pub struct NetCardData {
 
 pub struct MtgaIdTranslator {
     cache: HashMap<u32, Option<NetCardData>>,
-    last_request_time: Option<Instant>,
+    last_request_time: Cell<Option<Instant>>,
     repository: PathBuf,
 }
 
@@ -30,20 +31,20 @@ impl MtgaIdTranslator {
         }
         let file = File::open(&path)?;
         let cache = ron::de::from_reader(&file)?;
-        Ok(MtgaIdTranslator {
+        Ok(Self {
             cache,
-            last_request_time: None,
+            last_request_time: None.into(),
             repository: path.as_ref().to_path_buf(),
         })
     }
 
     #[inline]
-    fn handle_wait(&mut self) {
-        if let Some(time) = self.last_request_time {
-            let wait_time = SCRYFALL_WAIT_TIME.saturating_sub(Instant::now() - time);
+    fn handle_wait(&self) {
+        if let Some(time) = self.last_request_time.get() {
+            let wait_time = SCRYFALL_WAIT_TIME.saturating_sub(time.elapsed());
             std::thread::sleep(wait_time);
         }
-        self.last_request_time = Some(Instant::now());
+        self.last_request_time.set(Some(Instant::now()));
     }
 
     pub fn translate(&mut self, id: u32) -> Result<Option<NetCardData>> {
@@ -69,7 +70,7 @@ impl MtgaIdTranslator {
         Ok(Some(card_data))
     }
 
-    fn write(&self) -> Result<()> {
+    fn write_out(&self) -> Result<()> {
         std::fs::write(&self.repository, ron::to_string(&self.cache)?)?;
         Ok(())
     }
@@ -77,7 +78,7 @@ impl MtgaIdTranslator {
 
 impl Drop for MtgaIdTranslator {
     fn drop(&mut self) {
-        self.write()
+        self.write_out()
             .unwrap_or_else(|err| eprintln!("ERROR: while closing translator, {err}"));
     }
 }

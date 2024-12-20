@@ -1,7 +1,7 @@
 use crate::mtga_id_translator::{MtgaIdTranslator, NetCardData};
 use crate::{Collection, Rarity};
 use anyhow::{anyhow, Context, Result};
-use indicatif::ProgressBar;
+use indicatif::ProgressIterator;
 use reqwest::Url;
 use serde::Deserialize;
 
@@ -41,7 +41,7 @@ struct DaemonReply {
 pub struct CardGetter;
 
 impl CardGetter {
-    fn address() -> &'static str {
+    const fn address() -> &'static str {
         "http://localhost:9000"
     }
 
@@ -55,27 +55,22 @@ impl CardGetter {
             )?
             .json::<DaemonReply>()
             .context("Unable to parse json from card daemon. Make sure the game is idling in the main menu.")?.cards;
-        let pb = ProgressBar::new(cards.len() as u64);
         let collection = cards
             .into_iter()
+            .progress()
             .flat_map(|NameAmount { id, owned }| {
-                pb.inc(1);
                 let card_data = translator
                     .translate(id)?
                     .ok_or(anyhow!("Card with id {id} does not exist on scryfall"))?;
                 Ok::<_, anyhow::Error>((card_data.name, owned, card_data.rarity, card_data.set))
             })
             .collect::<Collection>();
-        pb.finish_and_clear();
         Ok(collection)
     }
 
     pub fn fetch_card(name: impl AsRef<str>) -> Result<Vec<NetCardData>> {
         let name = crate::collection::simplified_name(&name);
-        let to_parse = format!(
-            "https://api.scryfall.com/cards/search?q={}&unique=prints",
-            name
-        );
+        let to_parse = format!("https://api.scryfall.com/cards/search?q={name}&unique=prints",);
         let url =
             Url::parse(&to_parse).with_context(|| anyhow!("Failed to parse url {to_parse}"))?;
         let prints: Vec<ScryfallCardData> = reqwest::blocking::get(url)
@@ -91,7 +86,7 @@ impl CardGetter {
                      name,
                      rarity,
                      set,
-                     games: _,
+                    ..
                  }| NetCardData { name, rarity, set },
             )
             .collect();

@@ -1,16 +1,9 @@
-// #![warn(
-//     missing_docs,
-//     missing_debug_implementations,
-//     missing_copy_implementations,
-//     rust_2018_idioms
-// )]
-#![allow(clippy::pedantic)]
-
 use crate::collection::Collection;
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     fs::{self, File},
     io::Write,
@@ -46,7 +39,7 @@ pub struct CardData {
 
 impl From<(u8, String, Rarity, String)> for CardData {
     fn from(value: (u8, String, Rarity, String)) -> Self {
-        CardData {
+        Self {
             amount: value.0,
             name: value.1,
             rarity: value.2,
@@ -57,7 +50,7 @@ impl From<(u8, String, Rarity, String)> for CardData {
 
 impl From<(String, (u8, Rarity, String))> for CardData {
     fn from(value: (String, (u8, Rarity, String))) -> Self {
-        CardData {
+        Self {
             amount: value.1 .0,
             name: value.0,
             rarity: value.1 .1,
@@ -74,7 +67,16 @@ pub struct WildcardCoefficients {
     pub mythic: f32,
 }
 
+fn simple_order(a: f32, b: f32) -> Ordering {
+    match (b - a).signum() {
+        1.0 => Ordering::Less,
+        -1.0 => Ordering::Greater,
+        _ => Ordering::Equal,
+    }
+}
+
 impl WildcardCoefficients {
+    #[must_use]
     pub fn select(&self, rarity: &Rarity) -> f32 {
         match rarity {
             Rarity::Common => self.common,
@@ -85,6 +87,7 @@ impl WildcardCoefficients {
         }
     }
 
+    #[must_use]
     pub fn order(&self) -> [Rarity; 5] {
         use Rarity as R;
         let common = (R::Common, self.common);
@@ -93,7 +96,7 @@ impl WildcardCoefficients {
         let mythic = (R::Mythic, self.mythic);
 
         let mut rarities = [common, uncommon, rare, mythic];
-        rarities.sort_unstable_by(|(_, c1), (_, c2)| c1.partial_cmp(c2).unwrap());
+        rarities.sort_unstable_by(|(_, c1), (_, c2)| simple_order(*c1, *c2));
         [
             rarities[0].0,
             rarities[1].0,
@@ -106,26 +109,29 @@ impl WildcardCoefficients {
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
 pub struct Wildcards {
-    pub common: u32,
-    pub uncommon: u32,
-    pub rare: u32,
-    pub mythic: u32,
+    pub common: f32,
+    pub uncommon: f32,
+    pub rare: f32,
+    pub mythic: f32,
 }
 
 impl Wildcards {
-    pub fn select(&self, rarity: &Rarity) -> u32 {
-        match rarity {
+    #[must_use]
+    pub fn select(&self, rarity: &Rarity) -> i32 {
+        (match rarity {
             Rarity::Common => self.common,
             Rarity::Uncommon => self.uncommon,
             Rarity::Rare => self.rare,
             Rarity::Mythic => self.mythic,
-            Rarity::Land | Rarity::Unknown => 0,
-        }
+            Rarity::Land | Rarity::Unknown => 0.0,
+        })
+        .round() as i32
     }
 
+    #[must_use]
     pub fn coefficients(&self) -> WildcardCoefficients {
         let total = self.common + self.uncommon + self.rare + self.mythic;
-        let formula = |w| total as f32 / (1.0 + w as f32);
+        let formula = |w| total / (1.0 + w);
         WildcardCoefficients {
             common: formula(self.common),
             uncommon: formula(self.uncommon),
@@ -218,7 +224,7 @@ impl FromStr for Deck {
                 }
             }
         }
-        Ok(Deck {
+        Ok(Self {
             name: "Unnamed".to_owned(),
             amounts_main,
             amounts_side,
@@ -230,8 +236,9 @@ impl FromStr for Deck {
 }
 
 impl Deck {
+    #[must_use]
     pub fn name(self, name: &str) -> Self {
-        Deck {
+        Self {
             name: name.to_owned(),
             ..self
         }
@@ -265,6 +272,11 @@ impl Deck {
 
         cards_amounts.into_iter()
     }
+
+    pub fn contains(&self, s: &impl PartialEq<String>, ignore_sideboard: bool) -> bool {
+        (!ignore_sideboard && self.names_side.iter().any(|ns| s.eq(ns)))
+            || self.names_main.iter().any(|nm| s.eq(nm))
+    }
 }
 
 #[derive(Debug)]
@@ -281,25 +293,32 @@ impl Roster {
         self.decks.iter()
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.decks.len()
     }
 
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
     pub fn get(&self, n: usize) -> Option<&Deck> {
         self.decks.get(n)
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = if !path.as_ref().exists() {
+        let file = if path.as_ref().exists() {
+            File::open(&path)?
+        } else {
             let mut file = File::create(&path)?;
             file.write_all(b"[]")?;
             file
-        } else {
-            File::open(&path)?
         };
         let decks = serde_json::from_reader(file)
             .map_err(|err| anyhow!("Failed to deserialize roster: {err}"))?;
-        Ok(Roster {
+        Ok(Self {
             path: path.as_ref().to_path_buf(),
             decks,
         })
@@ -382,13 +401,13 @@ impl Inventory {
         }
         let collection: Collection = serde_json::from_reader(File::open(&collection_path)?)
             .with_context(|| format!("Failed to open collection with path {collection_path:?}"))?;
-        let wildcards: Wildcards = if !wildcards_path.as_ref().exists() {
-            Wildcards::default()
-        } else {
+        let wildcards: Wildcards = if wildcards_path.as_ref().exists() {
             serde_json::from_reader(File::open(&wildcards_path)?).unwrap_or_default()
+        } else {
+            Wildcards::default()
         };
         let coeffs = wildcards.coefficients();
-        Ok(Inventory {
+        Ok(Self {
             collection,
             coeffs,
             collection_path: collection_path.as_ref().to_path_buf(),
@@ -413,11 +432,12 @@ impl Inventory {
         if missing == 0 {
             Ok(0.0)
         } else {
-            let tiebreaker_bonus = 4.0 / missing as f32;
-            Ok(self.card_cost(card_name)? * missing as f32 + tiebreaker_bonus)
+            let tiebreaker_bonus = 4.0 / f32::from(missing);
+            Ok((self.card_cost(card_name)?).mul_add(f32::from(missing), tiebreaker_bonus))
         }
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn cheapest_rarity(&self, card_name: &str) -> Result<Rarity> {
         let card_group = self.collection.get(card_name)?;
         let group_rarities = card_group.iter().map(|(_, rarity, _)| rarity).collect_vec();
@@ -429,6 +449,7 @@ impl Inventory {
         Ok(*cheapest_rarity)
     }
 
+    #[allow(clippy::missing_panics_doc)]
     pub fn cheapest_version<'a>(&'a self, card_name: &'a str) -> Result<&(u8, Rarity, String)> {
         let cheapest_rarity = self.cheapest_rarity(card_name)?;
         let card_group = self.collection.get(card_name)?;
@@ -453,9 +474,12 @@ impl Inventory {
         let mut result = 0.0;
         for (card_name, amount) in deck.cards(ignore_sideboard) {
             let missing = amount.saturating_sub(self.card_amount(card_name)?);
-            result += missing as f32 * self.card_cost(card_name)?;
+            result += f32::from(missing) * self.card_cost(card_name)?;
         }
-        let closeness_bound = self.rare_coeff() * 4.0 + self.mythic_coeff();
+        if result.abs() < f32::EPSILON {
+            return Ok(0.0);
+        }
+        let closeness_bound = self.rare_coeff().mul_add(4.0, self.mythic_coeff());
         let cool_formula = f32::max(result - closeness_bound, 1.00);
         Ok(cool_formula)
     }
@@ -479,22 +503,27 @@ impl Inventory {
         self.collection.missing(deck, ignore_sideboard)
     }
 
+    #[must_use]
     pub fn wildcard_coeffs(&self) -> &WildcardCoefficients {
         &self.coeffs
     }
 
+    #[must_use]
     pub fn common_coeff(&self) -> f32 {
         self.coeffs.common
     }
 
+    #[must_use]
     pub fn uncommon_coeff(&self) -> f32 {
         self.coeffs.uncommon
     }
 
+    #[must_use]
     pub fn rare_coeff(&self) -> f32 {
         self.coeffs.rare
     }
 
+    #[must_use]
     pub fn mythic_coeff(&self) -> f32 {
         self.coeffs.mythic
     }

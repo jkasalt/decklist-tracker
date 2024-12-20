@@ -1,11 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{arg, Parser, Subcommand};
 use detr::{
-    card_getter::CardGetter, collection::Collection, craft_suggester::CraftSuggester,
+    card_getter::CardGetter, collection::Collection, craft_suggester::CraftRecommender,
     mtga_id_translator::MtgaIdTranslator, Deck, Inventory, Rarity, Roster, Wildcards,
 };
 use directories::BaseDirs;
-use either::*;
+use either::{Left, Right};
 use itertools::Itertools;
 use mktemp::Temp;
 use regex::Regex;
@@ -104,7 +104,12 @@ enum Commands {
     WhichSet {
         set: String,
     },
-    Recommend,
+    Recommend {
+        rare_limit: usize,
+        mythic_limit: usize,
+        #[arg(long, short, help = "Result will contain the specified decks")]
+        with: Option<Vec<String>>,
+    },
     PrintCoeffs,
 }
 
@@ -166,12 +171,12 @@ fn suggest(
             let rarity = inventory
                 .cheapest_rarity(card_name)
                 .context("When computing rarity")?;
-            let deck_cost = if !equally {
+            let deck_cost = if equally {
+                100.0
+            } else {
                 inventory
                     .deck_cost(deck, ignore_sideboard)
                     .with_context(|| format!("Failed to compute deck cost for `{}`", deck.name))?
-            } else {
-                100.0
             };
             let selected_sugg = match rarity {
                 Rarity::Common => &mut sug_common,
@@ -194,11 +199,11 @@ fn suggest(
         (sug_mythic, "Mythic Rare"),
     ];
     for (suggestions, rarity) in suggestions {
-        println!("{}", rarity);
+        println!("{rarity}");
         let mut suggestions: Vec<(&String, f32)> = suggestions.into_iter().collect();
         suggestions.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         for (card_name, sugg_coeff) in suggestions.iter().take(10) {
-            println!("{:.2} {}", sugg_coeff, card_name);
+            println!("{sugg_coeff:.2} {card_name}");
         }
         println!();
     }
@@ -206,12 +211,12 @@ fn suggest(
 }
 
 fn add_from_file(
-    deck_paths: &Vec<String>,
+    deck_paths: &[String],
     names: Option<&Vec<String>>,
     roster: &mut Roster,
 ) -> Result<()> {
     let names_iter = match names {
-        Some(names) => Left(names.iter().map(|s| s.as_str())),
+        Some(names) => Left(names.iter().map(std::string::String::as_str)),
         None => Right(std::iter::repeat("Unnamed").take(deck_paths.len())),
     };
     let decks: Vec<Deck> = deck_paths
@@ -232,6 +237,7 @@ fn add_from_file(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let base_dirs = BaseDirs::new().ok_or(anyhow!("Could not obtain system's base directories"))?;
@@ -256,7 +262,7 @@ fn main() -> anyhow::Result<()> {
     let ignore_sideboard = cli.ignore_sb;
     match cli.command {
         Some(Commands::AddFromFile { deck_paths, names }) => {
-            add_from_file(&deck_paths, names.as_ref(), &mut roster)?
+            add_from_file(&deck_paths, names.as_ref(), &mut roster)?;
         }
         Some(Commands::Booster) => {
             // For each set, sums up the card values
@@ -266,7 +272,7 @@ fn main() -> anyhow::Result<()> {
                 let set_name = &card_cheapest_version.2;
                 let card_cost = inventory.card_cost(card_name)?;
                 let missing_amount = amount.saturating_sub(inventory.card_amount(card_name)?);
-                *set_values.entry(set_name).or_insert(0.0) += card_cost * missing_amount as f32;
+                *set_values.entry(set_name).or_insert(0.0) += card_cost * f32::from(missing_amount);
             }
             let mut set_values = set_values.iter().collect_vec();
             set_values.sort_unstable_by(|(_, v1), (_, v2)| v2.partial_cmp(v1).unwrap());
@@ -311,7 +317,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Missing { deck_name }) => {
-            missing(&deck_name, &roster, &inventory, ignore_sideboard)?
+            missing(&deck_name, &roster, &inventory, ignore_sideboard)?;
         }
         Some(Commands::Paste { name }) => {
             let deck: Deck =
@@ -323,9 +329,22 @@ fn main() -> anyhow::Result<()> {
             roster.add_deck(deck);
         }
         Some(Commands::PrintCoeffs) => println!("{:?}", inventory.wildcard_coeffs()),
-        Some(Commands::Recommend) => {
+        Some(Commands::Recommend {
+            rare_limit,
+            mythic_limit,
+            with,
+        }) => {
             let collection = Collection::open(&collection_path)?;
-            CraftSuggester::new(99, &roster, &collection).recommend();
+            let craft_suggester = CraftRecommender::new(
+                rare_limit,
+                mythic_limit,
+                ignore_sideboard,
+                with,
+                &roster,
+                &collection,
+            );
+            let result = craft_suggester.recommend();
+            println!("{result:#?}");
         }
         Some(Commands::Remove { deck_name }) => {
             roster
@@ -346,15 +365,15 @@ fn main() -> anyhow::Result<()> {
             mythic,
         }) => {
             let wildcards = Wildcards {
-                common,
-                uncommon,
-                rare,
-                mythic,
+                common: common as f32,
+                uncommon: uncommon as f32,
+                rare: rare as f32,
+                mythic: mythic as f32,
             };
             fs::write(wildcards_path, serde_json::to_string(&wildcards)?)?;
         }
         Some(Commands::Show { deck_name }) => {
-            roster.find(&deck_name).map(|deck| println!("{deck}"))?
+            roster.find(&deck_name).map(|deck| println!("{deck}"))?;
         }
         Some(Commands::Suggest { equally }) => {
             suggest(&roster, &mut inventory, ignore_sideboard, equally)?;
@@ -363,7 +382,7 @@ fn main() -> anyhow::Result<()> {
             // std::fs::copy(path, collection_path)?;
             let recently_fetched =
                 CardGetter::owned_cards(&mut translator).context("Failed to get owned cards")?;
-            inventory.update_collection(recently_fetched, &roster)
+            inventory.update_collection(recently_fetched, &roster);
         }
         Some(Commands::Which { query }) => {
             let re = Regex::new(&query)?;

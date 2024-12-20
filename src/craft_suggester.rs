@@ -1,9 +1,21 @@
-use indicatif::ProgressBar;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use bitvec::{bitvec, vec::BitVec};
+use itertools::Itertools;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::{collection::Collection, Rarity, Roster};
+use crate::{collection::Collection, Deck, Rarity, Roster};
 
-struct MissingRares<'a>(BTreeSet<&'a str>);
+fn build_matrix(decks: &[&Deck], rows_index: &BTreeSet<(&String, u8)>) -> Vec<BitVec> {
+    let mut columns: Vec<BitVec> = Vec::new();
+    for deck in decks {
+        let mut column = vec![false; rows_index.len()];
+        for (i, (rare, _)) in rows_index.iter().enumerate() {
+            column[i] = deck.contains(*rare, false);
+        }
+        let column = BitVec::from_iter(column);
+        columns.push(column);
+    }
+    columns
+}
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Default)]
 struct IterationState<'a> {
@@ -11,111 +23,163 @@ struct IterationState<'a> {
     decks: BTreeSet<usize>,
 }
 
-pub struct CraftSuggester<'a, 'b> {
+pub struct CraftRecommender<'r, 'c> {
     rares_limit: usize,
-    // mythics_limit: usize,
-    roster: &'a Roster,
-    collection: &'b Collection,
+    mythics_limit: usize,
+    roster: &'r Roster,
+    collection: &'c Collection,
+    starting_sel: Vec<String>,
+    ignore_sb: bool,
 }
 
-impl<'a, 'b> CraftSuggester<'a, 'b> {
+impl<'r, 'c> CraftRecommender<'r, 'c> {
+    #[must_use]
     pub fn new(
         rares: usize,
-        // mythics: usize,
-        roster: &'a Roster,
-        collection: &'b Collection,
+        mythics: usize,
+        ignore_sideboard: bool,
+        starting_sel: Option<Vec<String>>,
+        roster: &'r Roster,
+        collection: &'c Collection,
     ) -> Self {
-        CraftSuggester {
+        CraftRecommender {
             rares_limit: rares,
-            // mythics_limit: mythics,
+            mythics_limit: mythics,
+            ignore_sb: ignore_sideboard,
+            starting_sel: starting_sel.unwrap_or_default(),
             roster,
             collection,
         }
     }
 
+    fn build_rows_index(&self, decks: &[&'r Deck], target: Rarity) -> BTreeSet<(&String, u8)> {
+        let mut rows_index = BTreeSet::new();
+        for deck in decks {
+            let missing = self.collection.missing(deck, self.ignore_sb).unwrap();
+            for (name, amount, rarity, _) in missing {
+                if rarity == target {
+                    for n in 1..=amount {
+                        rows_index.insert((name, n));
+                    }
+                }
+            }
+        }
+        rows_index
+    }
+
+    fn relevant_decks(&self) -> Vec<&Deck> {
+        self.roster
+            .decks()
+            .filter(|deck| {
+                let missing_rares = self
+                    .collection
+                    .count_missing_of_rarity(deck, self.ignore_sb, Rarity::Rare)
+                    .unwrap();
+                let missing_mythics = self
+                    .collection
+                    .count_missing_of_rarity(deck, self.ignore_sb, Rarity::Mythic)
+                    .unwrap();
+                0 < missing_rares + missing_mythics
+                    && missing_rares <= self.rares_limit
+                    && missing_mythics <= self.mythics_limit
+            })
+            .collect()
+    }
+
     /// Returns recommended crafts in the order of importance, following our
-    /// homemade cool algorithm.  Given a ``wildcards horizon'', that is the numbere
+    /// homemade cool algorithm.  Given a `wildcards horizon`, that is the number
     /// of wildcards the user is expected to obtain in a certain amount of time
     /// (usually 25 rares for 3 months of play), it maximizes the number of
     /// different number of decks the user can play
-    pub fn recommend(&self) {
-        let mut mem = HashMap::new();
-        let possible = (0..self.roster.len()).collect();
-        let mut missing_rares = Vec::new();
-        for deck in self.roster.decks() {
-            let this_missing_rares = MissingRares(
-                self.collection
-                    .missing(deck, false)
-                    .unwrap()
-                    .iter()
-                    .filter_map(|(name, _, rarity, _)| {
-                        (*rarity == Rarity::Rare).then_some(name.as_str())
-                    })
-                    .collect(),
-            );
-            missing_rares.push(this_missing_rares)
-        }
-        let all_missing_rares: BTreeSet<&&str> =
-            missing_rares.iter().flat_map(|mr| &mr.0).collect();
-        if all_missing_rares.len() < self.rares_limit {
-            println!("You can craft every deck");
-        }
-        let starting_state = IterationState::default();
-        let pb = ProgressBar::new(2u64.pow(self.roster.len() as u32));
+    #[must_use]
+    pub fn recommend(&self) -> Vec<Vec<&str>> {
+        // Get the decks for which we are missing at least a rare or mythic card
+        let decks: Vec<_> = self.relevant_decks();
 
-        self.recommend_inner(&mut mem, possible, starting_state, &missing_rares, &pb);
-        // pb.finish();
-        // dbg!(mem);
+        // Build the memo table
+        let mut mem = HashMap::new();
+
+        // Build the matrix
+        // Get the rows
+        let all_rares = self.build_rows_index(&decks, Rarity::Rare);
+        let all_mythics = self.build_rows_index(&decks, Rarity::Mythic);
+
+        // Get the columns
+        let columns_rares = build_matrix(&decks, &all_rares);
+        let columns_mythics = build_matrix(&decks, &all_mythics);
+
+        // Get the starting sel
+        let starting_bits = decks
+            .iter()
+            .map(|deck| self.starting_sel.contains(&deck.name))
+            .collect();
+
+        // Iterate over all possible combinations
+        self.recommend_inner(&mut mem, &columns_rares, &columns_mythics, starting_bits);
+
+        // Collect the result
+        let result: Vec<_> = mem.into_iter().max_set_by(|(k1, v1), (k2, v2)| {
+            let d1 = k1.iter_ones().count();
+            let d2 = k2.iter_ones().count();
+            v1.cmp(v2).then(d1.cmp(&d2))
+        });
+
+        // Turn the codes back into deck names
+        let decks_codes: Vec<_> = result.iter().map(|(decks, _)| decks).collect();
+        decks_codes
+            .iter()
+            .map(|decks_code| {
+                decks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, deck)| (decks_code[i]).then_some(deck.name.as_str()))
+                    .collect()
+            })
+            .collect()
     }
 
-    fn recommend_inner<'c>(
+    fn recommend_inner(
         &self,
-        mem: &mut HashMap<IterationState<'c>, usize>,
-        mut possible: Vec<usize>,
-        iteration_state: IterationState<'c>,
-        missing_rares: &'c [MissingRares],
-        pb: &ProgressBar,
+        mem: &mut HashMap<BitVec, usize>,
+        columns_rares: &[BitVec],
+        columns_mythics: &[BitVec],
+        current_sel: BitVec,
     ) -> usize {
-        if let Some(val) = mem.get(&iteration_state) {
+        if let Some(val) = mem.get(&current_sel) {
             return *val;
         }
-        pb.inc(1);
-        // Remove impossible decks
-        possible.retain(|possible_idx| {
-            let this_missing_rares = &missing_rares[*possible_idx].0;
-            !iteration_state.decks.contains(possible_idx)
-                && iteration_state
-                    .missing_rares
-                    .union(this_missing_rares)
-                    .count()
-                    <= self.rares_limit
-        });
-        // Return if we are in an end-case
+        // Get possible next steps
+        let possible: Vec<_> = (0..columns_rares.len())
+            .map(|j| current_sel.clone() | BitVec::from_element(1 << j))
+            .filter(|new_sel| *new_sel != current_sel)
+            .filter(|new_sel| {
+                let count_nonzero = |columns: &[BitVec]| {
+                    columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, c)| (new_sel[i]).then_some(c)) // Pick out the columns that belong to new_sel
+                        .fold(bitvec!(0; columns[0].len()), |acc, x| acc | x) // Join them
+                        .iter_ones()
+                        .count()
+                };
+                let num_selected_rares = count_nonzero(columns_rares);
+                let num_selected_mythics = count_nonzero(columns_mythics);
+                num_selected_rares <= self.rares_limit && num_selected_mythics <= self.mythics_limit
+            })
+            .collect();
         if possible.is_empty() {
-            let num_decks = iteration_state.decks.len();
-            mem.insert(iteration_state, num_decks);
-            return num_decks;
+            let result = current_sel.iter_ones().count();
+            mem.insert(current_sel, result);
+            return result;
         }
-        // Otherwise, recurse over all possible decks
-        let mut this_iter = HashMap::new(); // keys are "added this index this time" value are best result
-        for possible_idx in possible.iter() {
-            let mut new_itereation_state = iteration_state.clone();
-            new_itereation_state.decks.insert(*possible_idx);
-            let this_missing_rares = &missing_rares[*possible_idx].0;
-            new_itereation_state
-                .missing_rares
-                .extend(this_missing_rares);
-            let obtained = self.recommend_inner(
-                mem,
-                possible.clone(),
-                new_itereation_state,
-                missing_rares,
-                pb,
-            );
-            this_iter.insert(possible_idx, obtained);
-        }
-        let (_, best_value) = this_iter.into_iter().max_by_key(|(_, v)| *v).unwrap();
-        mem.insert(iteration_state, best_value);
-        best_value
+        let best = possible
+            .iter()
+            .map(|new_sel| {
+                self.recommend_inner(mem, columns_rares, columns_mythics, new_sel.clone())
+            })
+            .max()
+            .unwrap();
+        mem.insert(current_sel, best);
+        best
     }
 }
